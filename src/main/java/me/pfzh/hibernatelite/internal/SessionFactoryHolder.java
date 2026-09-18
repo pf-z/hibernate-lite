@@ -3,12 +3,10 @@ package me.pfzh.hibernatelite.internal;
 import org.hibernate.SessionFactory;
 
 /**
- * 全局 {@link SessionFactory} 持有者。
+ * Holds the global SessionFactory instance.
  *
- * <p>生命周期与应用一致：由 {@code HibernateLite.Builder} 构建时创建，
- * 应用关闭时调用 {@link #close()} 释放。</p>
- *
- * <p>本类不可变、线程安全。不管理 Session，不参与事务。</p>
+ * @author Pengfei Zhang
+ * @since 2026/9/18
  */
 public final class SessionFactoryHolder implements AutoCloseable {
 
@@ -16,21 +14,20 @@ public final class SessionFactoryHolder implements AutoCloseable {
 
     public SessionFactoryHolder(SessionFactory factory) {
         if (factory == null) {
-            throw new IllegalArgumentException("SessionFactory 不能为 null");
+            throw new IllegalArgumentException("SessionFactory cannot be null");
         }
         this.factory = factory;
     }
 
     /**
-     * 获取全局唯一的 SessionFactory。
+     * Returns the SessionFactory.
      */
     public SessionFactory get() {
         return factory;
     }
 
     /**
-     * 关闭 SessionFactory，释放连接池等资源。
-     * 幂等：重复调用安全。
+     * Closes the SessionFactory.
      */
     @Override
     public void close() {

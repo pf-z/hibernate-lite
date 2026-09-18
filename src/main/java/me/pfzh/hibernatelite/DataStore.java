@@ -1,57 +1,138 @@
 package me.pfzh.hibernatelite;
 
+import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
 
 import java.util.List;
 
 /**
- * Hibernate-Lite 唯一门面。
+ * Main facade interface of Hibernate-Lite.
  *
- * <p>用户只依赖此接口。所有 CRUD、事务、逃生舱能力都通过这里暴露。</p>
+ * <p>
+ * This is the only API that users need to depend on.
+ * It hides Hibernate internal concepts such as Session,
+ * Transaction, and SessionFactory.
+ * </p>
+ *
+ * @author Pengfei Zhang
+ * @since 2026/9/18
  */
 public interface DataStore {
 
-    // ---------- 读 ----------
-
     /**
-     * 按主键查询。找不到返回 null。
+     * Finds an entity by its primary key.
+     *
+     * <p>
+     * If no entity exists with the given identifier,
+     * this method returns {@code null}.
+     * </p>
+     *
+     * @param type entity class
+     * @param id primary key value
+     * @return found entity or null
      */
     <T> T find(Class<T> type, Object id);
 
-    // ---------- 写 ----------
-
     /**
-     * 保存实体。ID 为 null → 新增；非 null → 更新（merge）。
+     * Saves an entity.
      *
-     * @return 持久化后的实体（merge 场景下为新实例）
+     * <p>
+     * The behavior depends on the entity identifier:
+     * </p>
+     *
+     * <ul>
+     *     <li>
+     *     ID is {@code null}: create a new database record.
+     *     </li>
+     *
+     *     <li>
+     *     ID is not {@code null}: update existing entity
+     *     through Hibernate merge operation.
+     *     </li>
+     * </ul>
+     *
+     * <p>
+     * Note:
+     * Hibernate {@code merge()} returns a managed copy.
+     * Therefore, the returned object may not be the same
+     * instance as the input object.
+     * </p>
+     *
+     * @param entity entity to persist
+     * @return persisted entity
      */
     <T> T save(T entity);
 
     /**
-     * 批量保存。整个操作在一个事务内完成。
+     * Saves multiple entities in one transaction.
      *
-     * <p><b>返回值说明</b>：返回列表中的实体因 flush + clear
-     * 可能已脱离 Persistence Context。如需继续修改后保存，请重新 find 或 merge。</p>
+     * <p>
+     * All entities are persisted within a single transaction
+     * to improve consistency and performance.
+     * </p>
      *
-     * @return 持久化后的实体列表（顺序与入参一致）
+     * <p>
+     * During batch processing, the persistence context may be
+     * flushed and cleared.
+     * Therefore returned objects may no longer be managed
+     * by Hibernate.
+     * </p>
+     *
+     * <p>
+     * If further modification is required,
+     * reload the entity through {@link #find(Class, Object)}
+     * or explicitly merge it again.
+     * </p>
+     *
+     * @param entities entities to save
+     * @return persisted entities in the same order
      */
     <T> List<T> saveAll(List<T> entities);
 
     /**
-     * 删除实体。
+     * Deletes an entity from database.
+     *
+     * <p>
+     * The operation is executed within the current transaction.
+     * </p>
+     *
+     * @param entity entity to remove
      */
     void delete(Object entity);
 
-    // ---------- 事务 ----------
 
     /**
-     * 在事务中执行回调，返回其结果。
-     * <p>抛 RuntimeException → 回滚并原样抛出。</p>
+     * Executes an operation inside a transaction.
+     *
+     * <p>
+     * Transaction lifecycle is managed automatically:
+     * </p>
+     *
+     * <ul>
+     *     <li>Begin transaction before callback execution</li>
+     *     <li>Commit after successful execution</li>
+     *     <li>Rollback when RuntimeException occurs</li>
+     * </ul>
+     *
+     * <p>
+     * Runtime exceptions are not wrapped or hidden;
+     * they are propagated to the caller after rollback.
+     * </p>
+     *
+     * @param callback transactional operation
+     * @return callback result
      */
     <T> T transaction(TransactionCallback<T> callback);
 
     /**
-     * 在事务中执行无返回值的操作。
+     * Executes a transaction without returning a value.
+     *
+     * <p>
+     * This is a convenience method that adapts
+     * {@link Runnable} into {@link TransactionCallback}.
+     * </p>
+     *
+     * @param work transactional operation
      */
     default void transaction(Runnable work) {
         transaction((TransactionCallback<Void>) () -> {
@@ -60,15 +141,29 @@ public interface DataStore {
         });
     }
 
-    // ---------- 逃生舱 ----------
-
     /**
-     * 获取底层对象。
+     * Provides access to underlying Hibernate objects.
      *
-     * <p>当前支持的类型：{@code SessionFactory.class}。</p>
+     * <p>
+     * This method is an escape hatch for advanced users
+     * who need features not directly exposed by Hibernate-Lite.
+     * </p>
      *
-     * @throws me.pfzh.hibernatelite.exception.HibernateLiteException 不支持的类型
-     *         不支持的类型
+     * <p>
+     * Currently supported:
+     * </p>
+     *
+     * <ul>
+     *     <li>{@code SessionFactory.class}</li>
+     * </ul>
+     *
+     * @param type requested underlying type
+     * @param <T> requested type
+     * @return underlying Hibernate object
+     *
+     * @throws HibernateLiteException
+     * if the requested type is unsupported
      */
     <T> T unwrap(Class<T> type);
+
 }

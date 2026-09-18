@@ -7,42 +7,84 @@ import org.hibernate.Transaction;
 import org.hibernate.resource.transaction.spi.TransactionStatus;
 
 /**
- * 线程绑定的事务上下文。
+ * Thread-local Hibernate session and transaction context.
  *
- * <p>核心职责：</p>
+ * <p>This class manages the lifecycle of the Session and Transaction
+ * associated with the current thread.</p>
+ *
+ * <p>Responsibilities:
  * <ul>
- *   <li>用 {@link ThreadLocal} 管理当前线程的 {@link Session}</li>
- *   <li>支持嵌套事务（depth 计数，最外层才真正 commit）</li>
- *   <li>区分"库打开的 Session"和"外部传入的 Session"，只关自己开的</li>
- *   <li>方法返回/异常时清理 ThreadLocal，避免线程池泄漏</li>
- *   <li>支持 markRollbackOnly：内层失败时标记整个事务回滚</li>
+ *     <li>Bind Session to the current thread through ThreadLocal.</li>
+ *     <li>Manage transaction lifecycle.</li>
+ *     <li>Support nested transactions through depth counting.</li>
+ *     <li>Release only resources created by this library.</li>
  * </ul>
  *
- * <p><b>本类方法为内部 API</b>，只允许 {@code CrudExecutor} 和
- * {@code TransactionManager} 调用。用户代码请勿直接使用。</p>
+ * <p>Hibernate does not support true nested transactions.
+ * Nested transactions are simulated by delaying commit until the outermost
+ * transaction completes.</p>
  *
- * <p><b>线程安全</b>：所有状态都在 ThreadLocal 中，天然线程隔离。</p>
+ * <p>This is an internal component and should not be used directly by users.</p>
+ *
+ * @author Pengfei Zhang
+ * @since 2026/9/18
  */
 public final class SessionContext {
 
+    /**
+     * Stores transaction context independently for each thread.
+     *
+     * <p>ThreadLocal provides thread isolation, so no additional
+     * synchronization is required.</p>
+     */
     private static final ThreadLocal<Holder> CURRENT = new ThreadLocal<>();
 
-    /** 禁止实例化 */
-    private SessionContext() {}
+    /**
+     * Utility class.
+     */
+    private SessionContext() {
+    }
 
-    // ==================== 内部状态 ====================
-
+    /**
+     * Holds the session and transaction state of the current thread.
+     */
     private static final class Holder {
+
+        /**
+         * Hibernate session bound to current thread.
+         */
         Session session;
+
+        /**
+         * Current database transaction.
+         */
         Transaction tx;
+
+        /**
+         * Transaction nesting depth.
+         *
+         * <p>depth == 0: no active transaction.</p>
+         * <p>depth == 1: outermost transaction.</p>
+         * <p>depth > 1: nested transaction.</p>
+         *
+         * <p>This counter does not create real nested database transactions.
+         * It only controls when the actual commit happens.</p>
+         */
         int depth;
+
+        /**
+         * Whether this Session was created by HibernateLite.
+         *
+         * <p>Only sessions owned by this library should be closed here.
+         * External sessions must not be closed by this class.</p>
+         */
         boolean owner;      // true = 本库打开的，负责关闭
     }
 
-    // ==================== 对外方法 ====================
-
     /**
-     * 获取当前线程的 Session，没有则创建。
+     * Gets the current thread's Session.
+     *
+     * <p>If no Session exists, a new one is created and bound to the thread.</p>
      */
     public static Session current(SessionFactory factory) {
         Holder h = CURRENT.get();
@@ -56,10 +98,10 @@ public final class SessionContext {
     }
 
     /**
-     * 开启事务。若已在事务中，只增加深度计数（支持嵌套）。
+     * Starts a transaction.
      *
-     * <p>只有最外层（depth 从 0 变 1）才真正调用
-     * {@link Session#beginTransaction()}。</p>
+     * <p>If a transaction already exists, only the nesting depth is increased.
+     * The actual Hibernate transaction is created only at the outermost level.</p>
      */
     public static void begin(SessionFactory factory) {
         Holder h = CURRENT.get();
@@ -74,78 +116,87 @@ public final class SessionContext {
                 h.tx = h.session.beginTransaction();
             } catch (RuntimeException e) {
                 closeIfOwner(h);
-                throw new HibernateLiteException("开启事务失败", e);
+                throw new HibernateLiteException("Failed to begin transaction", e);
             }
         }
         h.depth++;
     }
 
+
     /**
-     * 提交事务。若仍处于嵌套中（depth > 1），只减少深度，不真正提交。
+     * Commits the current transaction.
      *
-     * <p>最外层提交前会检查事务是否被标记为 rollback-only：</p>
-     * <ul>
-     *   <li>已标记 → 回滚，抛异常</li>
-     *   <li>未标记 → 正常提交</li>
-     * </ul>
+     * <p>Only the outermost transaction performs the real commit.
+     * Inner transactions only decrease the nesting depth.</p>
+     *
+     * <p>If an inner operation marked the transaction as rollback-only,
+     * the outermost commit will rollback instead.</p>
      */
     public static void commit() {
         Holder h = CURRENT.get();
         if (h == null) {
-            throw new HibernateLiteException("commit 时无事务上下文");
+            throw new HibernateLiteException("No transaction context");
         }
         if (h.depth <= 0) {
-            throw new HibernateLiteException("commit 时事务深度为 0，状态不一致");
+            throw new HibernateLiteException("Invalid transaction depth");
         }
 
         h.depth--;
 
+        // Nested transaction: wait for outer transaction.
         if (h.depth > 0) {
-            // 嵌套中，不提交
             return;
         }
 
-        // 最外层：处理提交
         if (h.tx == null) {
             closeIfOwner(h);
             return;
         }
 
-        // 已被标记为回滚
+        /*
+         * An inner operation may have marked this transaction as rollback-only.
+         *
+         * Even if the original exception was handled,
+         * the transaction must not be committed.
+         */
         if (h.tx.getStatus() == TransactionStatus.MARKED_ROLLBACK) {
             try {
                 h.tx.rollback();
             } catch (RuntimeException ignored) {
-                // 回滚失败无法补救
+
+                // Rollback failure cannot be recovered.
             } finally {
                 h.tx = null;
                 closeIfOwner(h);
             }
-            throw new HibernateLiteException("事务被标记为回滚");
+            throw new HibernateLiteException("\"Transaction marked rollback-only");
         }
 
-        // 正常提交
+        // Normal transaction commit.
         try {
             if (h.tx.isActive()) {
                 h.tx.commit();
             }
         } catch (RuntimeException e) {
+            // Commit failure: attempt rollback to restore consistency.
             tryRollback(h);
             closeIfOwner(h);
-            throw new HibernateLiteException("提交事务失败", e);
+            throw new HibernateLiteException("Failed to commit transaction", e);
         } finally {
+            // Always release transaction and session resources.
             h.tx = null;
             closeIfOwner(h);
         }
     }
 
     /**
-     * 回滚事务。
+     * Rolls back the current transaction.
      *
-     * <p><b>嵌套语义</b>：</p>
+     * <p>Nested transaction behavior:</p>
      * <ul>
-     *   <li>最外层（depth &lt;= 1）→ 直接回滚 + 关闭 Session</li>
-     *   <li>嵌套中（depth &gt; 1）→ 只标记 rollback-only，等最外层统一回滚</li>
+     *     <li>Outermost transaction: rollback immediately.</li>
+     *     <li>Nested transaction: mark rollback-only and let the outermost
+     *     transaction perform the rollback.</li>
      * </ul>
      */
     public static void rollback() {
@@ -153,21 +204,22 @@ public final class SessionContext {
         if (h == null) return;
 
         if (h.depth <= 1) {
-            // 最外层或不在事务：直接回滚 + 关闭
+            // Outermost transaction: rollback and release resources.
             tryRollback(h);
             h.depth = 0;
             closeIfOwner(h);
         } else {
-            // 嵌套中：标记 rollback-only，深度递减，让最外层处理
+            // Nested transaction: defer rollback to outer transaction.
             h.depth--;
             markRollbackOnlyInternal(h);
         }
     }
 
     /**
-     * 标记当前事务为 rollback-only。
+     * Marks the current transaction as rollback-only.
      *
-     * <p>用于内层操作失败但异常被吞掉的场景，保证最外层 commit 时回滚。</p>
+     * <p>This is used when an inner operation fails but the exception
+     * is handled by user code. The outer transaction must still rollback.</p>
      */
     public static void markRollbackOnly() {
         Holder h = CURRENT.get();
@@ -175,7 +227,7 @@ public final class SessionContext {
     }
 
     /**
-     * 当前线程是否在事务中。
+     * Checks whether the current thread is inside a transaction.
      */
     public static boolean inTransaction() {
         Holder h = CURRENT.get();
@@ -183,21 +235,22 @@ public final class SessionContext {
     }
 
     /**
-     * 若当前不在事务中，关闭 Session 并清理 ThreadLocal。
+     * Closes the current Session when no transaction is active.
      *
-     * <p>供不需要事务的只读操作显式清理资源。</p>
+     * <p>Used by operations that do not require explicit transactions.</p>
      */
     public static void close() {
         Holder h = CURRENT.get();
         if (h == null) return;
-        if (h.depth > 0) return;   // 有活动事务，不关
+        // Active transactions must keep the Session alive.
+        if (h.depth > 0) return;
         closeIfOwner(h);
     }
 
     /**
-     * 【测试专用】强制清理当前线程的 ThreadLocal。
+     * Test-only cleanup method.
      *
-     * <p>包级私有，仅供 internal 包内的测试调用，不属于公开 API。</p>
+     * <p>Clears ThreadLocal state and releases resources after tests.</p>
      */
     static void reset() {
         Holder h = CURRENT.get();
@@ -207,32 +260,42 @@ public final class SessionContext {
                 h.tx.rollback();
             }
         } catch (RuntimeException ignored) {
-            // 测试清理，静默
+            // Ignore cleanup failures during tests.
         }
         closeIfOwner(h);
     }
 
-    // ==================== 内部工具 ====================
-
+    /**
+     * Marks transaction as rollback-only internally.
+     */
     private static void markRollbackOnlyInternal(Holder h) {
         if (h == null || h.tx == null) return;
         try {
             h.tx.markRollbackOnly();
         } catch (RuntimeException ignored) {
-            // 标记失败静默，不掩盖原始异常
+            // Do not hide the original exception.
         }
     }
 
+    /**
+     * Attempts to rollback the transaction.
+     */
     private static void tryRollback(Holder h) {
         if (h.tx != null && h.tx.isActive()) {
             try {
                 h.tx.rollback();
             } catch (RuntimeException ignored) {
-                // 回滚失败无法补救，静默忽略，不掩盖原始异常
+                // Rollback failure cannot be recovered.
             }
         }
     }
 
+    /**
+     * Closes the Session if it is owned by HibernateLite.
+     *
+     * <p>Always removes ThreadLocal reference to prevent leaks
+     * when threads are reused by thread pools.</p>
+     */
     private static void closeIfOwner(Holder h) {
         if (h.owner && h.session != null) {
             try {
@@ -240,9 +303,11 @@ public final class SessionContext {
                     h.session.close();
                 }
             } catch (RuntimeException ignored) {
-                // 关闭失败无法补救
+                // Closing failure cannot be recovered.
             }
         }
+        // Prevent stale context from remaining in reused threads.
         CURRENT.remove();
     }
+
 }
