@@ -3,6 +3,7 @@ package me.pfzh.hibernatelite;
 import me.pfzh.hibernatelite.internal.CrudExecutor;
 import me.pfzh.hibernatelite.internal.DataStoreImpl;
 import me.pfzh.hibernatelite.internal.SessionFactoryHolder;
+import me.pfzh.hibernatelite.metadata.MetadataRegistry;
 import me.pfzh.hibernatelite.transaction.TransactionManager;
 import org.hibernate.SessionFactory;
 import org.hibernate.boot.MetadataSources;
@@ -146,8 +147,11 @@ public final class HibernateLite {
             // Wrap SessionFactory to centralize lifecycle management.
             SessionFactoryHolder holder = new SessionFactoryHolder(sessionFactory);
 
-            // Components share the same SessionFactory holder.
-            CrudExecutor crud = new CrudExecutor(holder);
+            // Shared metadata registry for the DataStore lifecycle.
+            MetadataRegistry metadataRegistry = new MetadataRegistry();
+
+            // Components share the same SessionFactory holder and metadata registry.
+            CrudExecutor crud = new CrudExecutor(holder, metadataRegistry);
             TransactionManager tx = new TransactionManager(holder);
 
             // Expose simplified API to users.

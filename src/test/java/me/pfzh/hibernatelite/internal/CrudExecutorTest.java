@@ -1,7 +1,10 @@
 package me.pfzh.hibernatelite.internal;
 
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.fixture.TestUser;
+import me.pfzh.hibernatelite.metadata.MetadataRegistry;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.Transaction;
@@ -33,7 +36,8 @@ class CrudExecutorTest {
         when(session.isOpen()).thenReturn(true);
         when(tx.isActive()).thenReturn(true);
 
-        crud = new CrudExecutor(new SessionFactoryHolder(sf));
+        MetadataRegistry registry = new MetadataRegistry();
+        crud = new CrudExecutor(new SessionFactoryHolder(sf), registry);
     }
 
     @AfterEach
@@ -201,4 +205,25 @@ class CrudExecutorTest {
     void save_entityWithoutId_throws() {
         assertThrows(HibernateLiteException.class, () -> crud.save(new NoId()));
     }
+
+    // ---------- 业务主键 ----------
+
+    @Entity
+    static class BusinessKeyEntity {
+        @Id
+        private String username;
+    }
+
+    @Test
+    void save_businessKeyWithNonNewId_throws() {
+        BusinessKeyEntity e = new BusinessKeyEntity();
+        e.username = "alice";
+
+        HibernateLiteException ex = assertThrows(HibernateLiteException.class,
+                () -> crud.save(e));
+
+        assertTrue(ex.getMessage().contains("Business identifier"),
+                "Expected message to contain 'Business identifier', actual: " + ex.getMessage());
+    }
+
 }

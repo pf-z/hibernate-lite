@@ -2,6 +2,8 @@ package me.pfzh.hibernatelite.internal;
 
 import jakarta.persistence.Id;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
+import me.pfzh.hibernatelite.metadata.EntityMeta;
+import me.pfzh.hibernatelite.metadata.MetadataRegistry;
 import org.hibernate.HibernateException;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
@@ -44,13 +46,22 @@ public final class CrudExecutor {
     private final SessionFactoryHolder factoryHolder;
 
     /**
+     * Provides cached metadata information for entity classes.
+     */
+    private final MetadataRegistry metadataRegistry;
+
+    /**
      * Creates a CRUD executor.
      */
-    public CrudExecutor(SessionFactoryHolder factoryHolder) {
+    public CrudExecutor(SessionFactoryHolder factoryHolder, MetadataRegistry metadataRegistry) {
         if (factoryHolder == null) {
-            throw new IllegalArgumentException("SessionFactoryHolder 不能为 null");
+            throw new IllegalArgumentException("SessionFactoryHolder cannot be null");
+        }
+        if (metadataRegistry == null) {
+            throw new IllegalArgumentException("MetadataRegistry cannot be null");
         }
         this.factoryHolder = factoryHolder;
+        this.metadataRegistry = metadataRegistry;
     }
 
     /**
@@ -129,7 +140,8 @@ public final class CrudExecutor {
                  * Detached entity:
                  * find its identifier first.
                  */
-                Object id = readId(entity);
+                EntityMeta meta = metadataRegistry.get(entity.getClass());
+                Object id = meta.getId(entity);
                 if (id == null) {
                     throw new HibernateLiteException(
                             "Entity ID is null: " + entity.getClass().getName());
@@ -209,21 +221,58 @@ public final class CrudExecutor {
     }
 
     /**
-     * Saves one entity.
+     * Saves an entity within an existing Hibernate session.
      *
-     * <p>Hibernate requires different operations for:
+     * <p>The persistence strategy depends on the identifier state:</p>
      * <ul>
-     *     <li>Transient entity -> persist()</li>
-     *     <li>Detached entity -> merge()</li>
+     *     <li>
+     *         If the identifier is {@code null}, the entity is treated as a new
+     *         entity and persisted using {@link Session#persist(Object)}.
+     *     </li>
+     *     <li>
+     *         If the entity uses {@link jakarta.persistence.GeneratedValue} and
+     *         the identifier is not {@code null}, the entity is treated as an
+     *         existing entity and merged using {@link Session#merge(Object)}.
+     *     </li>
+     *     <li>
+     *         For entities with business identifiers (without
+     *         {@code @GeneratedValue}), the identifier value alone cannot
+     *         distinguish between a new entity and an existing entity.
+     *         Therefore, automatic save semantics are not supported.
+     *     </li>
      * </ul>
+     *
+     * <p>This method intentionally avoids guessing persistence state for
+     * business-key entities to prevent unintended insert/update behavior.</p>
+     *
+     * @param session current Hibernate session
+     * @param entity entity instance to save
+     * @param <T> entity type
+     *
+     * @return the persisted or merged entity
+     *
+     * @throws HibernateLiteException if the entity uses a business identifier
+     *                                and automatic save semantics cannot be
+     *                                determined
      */
     @SuppressWarnings("unchecked")
     private <T> T doSave(Session session, T entity) {
-        Object id = readId(entity);
+        EntityMeta meta = metadataRegistry.get(entity.getClass());
+        Object id = meta.getId(entity);
         if (id == null) {
             session.persist(entity);
             return entity;
         }
+
+        // For business identifiers, a non-null ID does not indicate
+        // whether the entity is new or already persistent.
+        if (!meta.hasGeneratedId()) {
+            throw new HibernateLiteException(
+                    "Business identifier entity (without @GeneratedValue) does not support automatic save semantics: "
+                            + entity.getClass().getName()
+                            + ". Please explicitly choose persist or merge semantics (not supported in the current version).");
+        }
+
         return (T) session.merge(entity);
     }
 
@@ -249,37 +298,6 @@ public final class CrudExecutor {
             }
         }
         return result;
-    }
-
-    /**
-     * Reads entity primary key using reflection.
-     *
-     * <p>This avoids requiring users to implement
-     * a common interface for entities.</p>
-     */
-    private Object readId(Object entity) {
-        Class<?> clazz = entity.getClass();
-
-        /*
-         * Search fields including inherited fields.
-         */
-        for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
-            for (Field f : c.getDeclaredFields()) {
-                if (f.isAnnotationPresent(Id.class)) {
-                    f.setAccessible(true);
-                    try {
-                        return f.get(entity);
-                    } catch (IllegalAccessException e) {
-                        throw new HibernateLiteException(
-                                "Failed to read @Id: " + c.getName() + "#" + f.getName(), e);
-                    } catch (RuntimeException e) {
-                        throw new HibernateLiteException(
-                                "Reflection access failed: " + c.getName() + "#" + f.getName(), e);
-                    }
-                }
-            }
-        }
-        throw new HibernateLiteException("Entity has no @Id: " + clazz.getName());
     }
 
     /**
