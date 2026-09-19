@@ -2,6 +2,7 @@ package me.pfzh.hibernatelite.internal;
 
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.fixture.TestUser;
+import me.pfzh.hibernatelite.query.QueryExecutor;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
 import me.pfzh.hibernatelite.transaction.TransactionManager;
 import org.hibernate.SessionFactory;
@@ -20,6 +21,7 @@ class DataStoreImplTest {
     private SessionFactoryHolder holder;
     private SessionFactory sessionFactory;
     private DataStoreImpl store;
+    private QueryExecutor queryExecutor;
 
     @BeforeEach
     void setUp() {
@@ -27,7 +29,8 @@ class DataStoreImplTest {
         tx = mock(TransactionManager.class);
         sessionFactory = mock(SessionFactory.class);
         holder = new SessionFactoryHolder(sessionFactory);
-        store = new DataStoreImpl(crud, tx, holder);
+        queryExecutor = mock(QueryExecutor.class);
+        store = new DataStoreImpl(crud, tx, queryExecutor, holder);
     }
 
     @Test
@@ -97,11 +100,11 @@ class DataStoreImplTest {
     @Test
     void constructor_rejectsNull() {
         assertThrows(NullPointerException.class,
-                () -> new DataStoreImpl(null, tx, holder));
+                () -> new DataStoreImpl(null, tx, queryExecutor, holder));
         assertThrows(NullPointerException.class,
-                () -> new DataStoreImpl(crud, null, holder));
+                () -> new DataStoreImpl(crud, null, queryExecutor, holder));
         assertThrows(NullPointerException.class,
-                () -> new DataStoreImpl(crud, tx, null));
+                () -> new DataStoreImpl(crud, tx, queryExecutor, null));
     }
 
     @Test

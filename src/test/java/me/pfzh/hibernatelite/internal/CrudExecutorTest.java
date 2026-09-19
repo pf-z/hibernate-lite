@@ -38,8 +38,10 @@ class CrudExecutorTest {
         when(session.isOpen()).thenReturn(true);
         when(tx.isActive()).thenReturn(true);
 
+        // ★ 改这里
         MetadataRegistry registry = new MetadataRegistry();
-        crud = new CrudExecutor(new SessionFactoryHolder(sf), registry);
+        TransactionTemplate txTemplate = new TransactionTemplate(new SessionFactoryHolder(sf));
+        crud = new CrudExecutor(registry, txTemplate);
     }
 
     @AfterEach

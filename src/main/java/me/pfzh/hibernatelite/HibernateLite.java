@@ -3,7 +3,9 @@ package me.pfzh.hibernatelite;
 import me.pfzh.hibernatelite.internal.CrudExecutor;
 import me.pfzh.hibernatelite.internal.DataStoreImpl;
 import me.pfzh.hibernatelite.internal.SessionFactoryHolder;
+import me.pfzh.hibernatelite.internal.TransactionTemplate;
 import me.pfzh.hibernatelite.metadata.MetadataRegistry;
+import me.pfzh.hibernatelite.query.QueryExecutor;
 import me.pfzh.hibernatelite.transaction.TransactionManager;
 import org.hibernate.SessionFactory;
 import org.hibernate.boot.MetadataSources;
@@ -147,11 +149,13 @@ public final class HibernateLite {
                 SessionFactoryHolder holder = new SessionFactoryHolder(sessionFactory);
                 // Shared metadata registry for the DataStore lifecycle.
                 MetadataRegistry metadataRegistry = new MetadataRegistry();
+                TransactionTemplate txTemplate = new TransactionTemplate(holder);
                 // Components share the same SessionFactory holder and metadata registry.
-                CrudExecutor crud = new CrudExecutor(holder, metadataRegistry);
+                CrudExecutor crud = new CrudExecutor(metadataRegistry, txTemplate);
                 TransactionManager tx = new TransactionManager(holder);
+                QueryExecutor query = new QueryExecutor(metadataRegistry, txTemplate);   // ← 新增
                 // Expose simplified API to users.
-                return new DataStoreImpl(crud, tx, holder);
+                return new DataStoreImpl(crud, tx, query, holder);
             } catch (RuntimeException e) {
                 sessionFactory.close();
                 throw e;

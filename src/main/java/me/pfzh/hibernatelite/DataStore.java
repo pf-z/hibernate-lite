@@ -1,6 +1,7 @@
 package me.pfzh.hibernatelite;
 
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
+import me.pfzh.hibernatelite.query.LambdaQuery;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
 
 import java.util.List;
@@ -203,5 +204,10 @@ public interface DataStore extends AutoCloseable {
      */
     @Override
     void close();
+
+    /**
+     * Creates a type-safe query for the given entity class.
+     */
+    <T> LambdaQuery<T> query(Class<T> type);
 
 }

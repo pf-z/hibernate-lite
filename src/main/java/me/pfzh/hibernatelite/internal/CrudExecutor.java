@@ -39,27 +39,31 @@ public final class CrudExecutor {
     private static final int BATCH_SIZE = 50;
 
     /**
-     * Provides access to the global Hibernate SessionFactory.
-     */
-    private final SessionFactoryHolder factoryHolder;
-
-    /**
      * Provides cached metadata information for entity classes.
      */
     private final MetadataRegistry metadataRegistry;
 
     /**
-     * Creates a CRUD executor.
+     * Shared transaction wrapper.
      */
-    public CrudExecutor(SessionFactoryHolder factoryHolder, MetadataRegistry metadataRegistry) {
-        if (factoryHolder == null) {
-            throw new IllegalArgumentException("SessionFactoryHolder cannot be null");
-        }
+    private final TransactionTemplate txTemplate;
+
+    /**
+     * Creates a CRUD executor.
+     *
+     * @param metadataRegistry cached entity metadata; must not be {@code null}
+     * @param txTemplate       shared transaction wrapper; must not be {@code null}
+     */
+    public CrudExecutor(MetadataRegistry metadataRegistry,
+                        TransactionTemplate txTemplate) {
         if (metadataRegistry == null) {
             throw new IllegalArgumentException("MetadataRegistry cannot be null");
         }
-        this.factoryHolder = factoryHolder;
+        if (txTemplate == null) {
+            throw new IllegalArgumentException("TransactionTemplate cannot be null");
+        }
         this.metadataRegistry = metadataRegistry;
+        this.txTemplate = txTemplate;
     }
 
     /**
@@ -76,8 +80,8 @@ public final class CrudExecutor {
     public <T> T find(Class<T> type, Object id) {
         requireNonNull(type, "entity type");
         requireNonNull(id, "primary key");
-        return wrap("find", () -> execute(() ->
-                SessionContext.current(factoryHolder.get()).find(type, id)));
+        return wrap("find", () -> txTemplate.execute(session ->
+                session.find(type, id)));
     }
 
     /**
@@ -107,8 +111,8 @@ public final class CrudExecutor {
      */
     public <T> T save(T entity) {
         requireNonNull(entity, "entity");
-        return wrap("save", () -> execute(() ->
-                doSave(SessionContext.current(factoryHolder.get()), entity)));
+        return wrap("save", () -> txTemplate.execute(session ->
+                doSave(session, entity)));
     }
 
     /**
@@ -129,8 +133,8 @@ public final class CrudExecutor {
     public <T> List<T> saveAll(List<T> entities) {
         requireNonNull(entities, "entity list");
         if (entities.isEmpty()) return entities;
-        return wrap("saveAll", () -> execute(() ->
-                doSaveAll(SessionContext.current(factoryHolder.get()), entities)));
+        return wrap("saveAll", () -> txTemplate.execute(session ->
+                doSaveAll(session, entities)));
     }
 
     /**
@@ -146,16 +150,14 @@ public final class CrudExecutor {
     public void delete(Object entity) {
         requireNonNull(entity, "entity");
         wrap("delete", () -> {
-            executeVoid(() -> {
-                Session session = SessionContext.current(factoryHolder.get());
-
+            txTemplate.execute(session -> {
                 /*
                  * Managed entity:
                  * directly remove from persistence context.
                  */
                 if (session.contains(entity)) {
                     session.remove(entity);
-                    return;
+                    return null;
                 }
 
                 /*
@@ -176,68 +178,11 @@ public final class CrudExecutor {
                  * Delete is treated as idempotent.
                  */
                 if (managed == null) {
-                    return;
+                    return null;
                 }
                 session.remove(managed);
+                return null;
             });
-            return null;
-        });
-    }
-
-    /**
-     * Executes an operation with automatic transaction handling.
-     *
-     * <p>If caller already started a transaction,
-     * this method participates in that transaction.</p>
-     *
-     * <p>If no transaction exists:
-     * <ul>
-     *     <li>begin transaction</li>
-     *     <li>execute operation</li>
-     *     <li>commit or rollback</li>
-     * </ul>
-     */
-    private <R> R execute(Supplier<R> action) {
-        SessionFactory sf = factoryHolder.get();
-
-        /*
-         * Only create transaction when user code
-         * does not already run inside one.
-         */
-        boolean autoTx = !SessionContext.inTransaction();
-        if (autoTx) SessionContext.begin(sf);
-        try {
-            R result = action.get();
-            if (autoTx) SessionContext.commit();
-            return result;
-        } catch (RuntimeException e) {
-            /*
-             * If this method owns the transaction, rollback immediately.
-             * Otherwise mark the outer transaction as rollback-only.
-             *
-             * Note: if the exception originated from SessionContext.commit(),
-             * the context has already been cleaned up internally, and the
-             * rollback() call below is a no-op. It is kept here to cover
-             * failures raised by the action itself.
-             */
-            if (autoTx) {
-                SessionContext.rollback();
-            } else {
-                SessionContext.markRollbackOnly();
-            }
-            throw e;
-        }
-    }
-
-    /**
-     * Executes a void operation with automatic transaction handling.
-     *
-     * <p>Convenience overload of {@link #execute(Supplier)} for operations
-     * that do not return a value.</p>
-     */
-    private void executeVoid(Runnable action) {
-        execute(() -> {
-            action.run();
             return null;
         });
     }

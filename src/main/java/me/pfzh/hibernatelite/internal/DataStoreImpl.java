@@ -2,6 +2,8 @@ package me.pfzh.hibernatelite.internal;
 
 import me.pfzh.hibernatelite.DataStore;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
+import me.pfzh.hibernatelite.query.LambdaQuery;
+import me.pfzh.hibernatelite.query.QueryExecutor;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
 import me.pfzh.hibernatelite.transaction.TransactionManager;
 import org.hibernate.SessionFactory;
@@ -46,6 +48,8 @@ public final class DataStoreImpl implements DataStore {
      */
     private final TransactionManager transactionManager;
 
+    private final QueryExecutor queryExecutor;          // ← 新增
+
     /**
      * Holds the global Hibernate SessionFactory.
      *
@@ -63,10 +67,12 @@ public final class DataStoreImpl implements DataStore {
      */
     public DataStoreImpl(CrudExecutor crud,
                          TransactionManager transactionManager,
+                         QueryExecutor queryExecutor,
                          SessionFactoryHolder factoryHolder) {
         this.crud = Objects.requireNonNull(crud, "CrudExecutor cannot be null");
         this.transactionManager = Objects.requireNonNull(
                 transactionManager, "TransactionManager cannot be null");
+        this.queryExecutor = Objects.requireNonNull(queryExecutor, "QueryExecutor cannot be null");
         this.factoryHolder = Objects.requireNonNull(
                 factoryHolder, "SessionFactoryHolder cannot be null");
     }
@@ -159,6 +165,12 @@ public final class DataStoreImpl implements DataStore {
     @Override
     public void close() {
         factoryHolder.close();
+    }
+
+    @Override
+    public <T> LambdaQuery<T> query(Class<T> type) {
+        Objects.requireNonNull(type, "type cannot be null");
+        return new LambdaQuery<>(type, queryExecutor);
     }
 
 }
