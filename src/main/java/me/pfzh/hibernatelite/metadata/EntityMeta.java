@@ -5,6 +5,7 @@ import jakarta.persistence.Id;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -19,6 +20,14 @@ import java.util.Map;
  * <p>Instances are created and cached by {@link MetadataRegistry}.
  * Reflection scanning is performed only once for each entity class,
  * avoiding repeated reflection overhead during CRUD operations.</p>
+ *
+ * <p><b>Limitations:</b></p>
+ * <ul>
+ *     <li>Only field access is supported. {@code @Id} must be declared
+ *     on a field, not on a getter method.</li>
+ *     <li>Only single-field {@code @Id} is supported.
+ *     {@code @EmbeddedId} and composite keys are not supported.</li>
+ * </ul>
  *
  * @author Pengfei Zhang
  * @since 2026/9/18
@@ -75,11 +84,12 @@ public final class EntityMeta {
      * <p>The cached identifier field is used directly to avoid repeated
      * reflection scanning.</p>
      *
-     * @param entity entity instance
+     * @param entity entity instance; must not be {@code null} and must be
+     *               an instance of the entity class
      * @return identifier value
      *
-     * @throws IllegalArgumentException if the entity is null or has an
-     *                                  incompatible type
+     * @throws IllegalArgumentException if the entity is {@code null}
+     *                                  or not an instance of the entity class
      * @throws HibernateLiteException if reflection access fails
      */
     public Object getId(Object entity) {
@@ -123,7 +133,10 @@ public final class EntityMeta {
      * <p>This method is mainly used for field validation and future
      * extensions such as auditing or automatic field population.</p>
      *
-     * @param name field name
+     * <p>Only non-static, non-synthetic fields are included.
+     * Fields declared in superclasses are also visible.</p>
+     *
+     * @param name field name; if {@code null}, returns {@code null}
      * @return corresponding field, or {@code null} if not found
      */
     public Field getField(String name) {
@@ -142,27 +155,43 @@ public final class EntityMeta {
      *     <li>Until {@link Object}</li>
      * </ol>
      *
+     * <p>Static and synthetic fields are skipped.
+     * If more than one {@code @Id} field is found across the hierarchy,
+     * a {@link HibernateLiteException} is thrown.</p>
+     *
      * @param clazz entity class
      * @return identifier field
      *
-     * @throws HibernateLiteException if no {@link Id} field is found
+     * @throws HibernateLiteException if no {@code @Id} field is found,
+     *                                or if multiple {@code @Id} fields exist
      */
     private static Field findIdField(Class<?> clazz) {
+        Field found = null;
         for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
             for (Field f : c.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                if (f.isSynthetic()) continue;
                 if (f.isAnnotationPresent(Id.class)) {
+                    if (found != null) {
+                        throw new HibernateLiteException(
+                                "Multiple @Id fields found in entity: " + clazz.getName());
+                    }
                     f.setAccessible(true);
-                    return f;
+                    found = f;
                 }
             }
         }
-        throw new HibernateLiteException("Entity has no @Id field: " + clazz.getName());
+        if (found == null) {
+            throw new HibernateLiteException("Entity has no @Id field: " + clazz.getName());
+        }
+        return found;
     }
 
     /**
      * Scans all fields of an entity class.
      *
-     * <p>The scan includes fields declared in superclasses.</p>
+     * <p>The scan includes fields declared in superclasses.
+     * Static and synthetic fields are skipped.</p>
      *
      * <p>The scan starts from the child class and proceeds upward,
      * therefore fields declared in subclasses take precedence over
@@ -173,9 +202,10 @@ public final class EntityMeta {
      */
     private static Map<String, Field> scanFields(Class<?> clazz) {
         Map<String, Field> result = new HashMap<>();
-
         for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
             for (Field f : c.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                if (f.isSynthetic()) continue;
                 f.setAccessible(true);
                 result.put(f.getName(), f);
             }

@@ -14,11 +14,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class EntityMetaTest {
 
+    // ==================== 测试实体 ====================
+
     @Entity
     static class SimpleEntity {
         @Id
         private Long id;
         private String name;
+
+        public Long getId() { return id; }
+        public void setId(Long id) { this.id = id; }
     }
 
     @Entity
@@ -27,6 +32,9 @@ class EntityMetaTest {
         @GeneratedValue(strategy = GenerationType.IDENTITY)
         private Long id;
         private String name;
+
+        public Long getId() { return id; }
+        public void setId(Long id) { this.id = id; }
     }
 
     @Entity
@@ -34,6 +42,9 @@ class EntityMetaTest {
         @Id
         private String username;
         private String email;
+
+        public String getUsername() { return username; }
+        public void setUsername(String username) { this.username = username; }
     }
 
     @MappedSuperclass
@@ -48,17 +59,41 @@ class EntityMetaTest {
     @Entity
     static class ChildEntity extends BaseEntity {
         private String name;
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
     }
 
     static class NoIdEntity {
         private String name;
     }
 
+    @Entity
+    static class MultiIdEntity {
+        @Id
+        private Long id1;
+
+        @Id
+        private Long id2;
+    }
+
+    @Entity
+    static class StaticFieldEntity {
+        @Id
+        private Long id;
+
+        private static final String CONSTANT = "x";
+
+        private String name;
+
+        public Long getId() { return id; }
+        public void setId(Long id) { this.id = id; }
+    }
+
     // ==================== idField 查找 ====================
 
     @Test
     void findIdField_simpleEntity() {
-        // 能构造成功即说明找到了 @Id 字段
         EntityMeta meta = new EntityMeta(SimpleEntity.class);
         assertNotNull(meta);
         assertEquals(SimpleEntity.class, meta.getEntityClass());
@@ -69,7 +104,7 @@ class EntityMetaTest {
         EntityMeta meta = new EntityMeta(ChildEntity.class);
         ChildEntity c = new ChildEntity();
         c.setId(42L);
-        assertEquals(42L, meta.getId(c));
+        assertEquals(Long.valueOf(42L), meta.getId(c));
     }
 
     @Test
@@ -78,14 +113,20 @@ class EntityMetaTest {
                 () -> new EntityMeta(NoIdEntity.class));
     }
 
+    @Test
+    void findIdField_multipleIds_throws() {
+        assertThrows(HibernateLiteException.class,
+                () -> new EntityMeta(MultiIdEntity.class));
+    }
+
     // ==================== getId ====================
 
     @Test
     void getId_returnsValue() {
         EntityMeta meta = new EntityMeta(SimpleEntity.class);
         SimpleEntity e = new SimpleEntity();
-        e.id = 1L;
-        assertEquals(1L, meta.getId(e));
+        e.setId(1L);
+        assertEquals(Long.valueOf(1L), meta.getId(e));
     }
 
     @Test
@@ -148,5 +189,15 @@ class EntityMetaTest {
         EntityMeta meta = new EntityMeta(ChildEntity.class);
         assertNotNull(meta.getField("name"));
         assertNotNull(meta.getField("id"));   // 父类字段
+    }
+
+    // ==================== 字段过滤 ====================
+
+    @Test
+    void scanFields_skipsStaticFields() {
+        EntityMeta meta = new EntityMeta(StaticFieldEntity.class);
+        assertNull(meta.getField("CONSTANT"), "static field should be skipped");
+        assertNotNull(meta.getField("name"));
+        assertNotNull(meta.getField("id"));
     }
 }

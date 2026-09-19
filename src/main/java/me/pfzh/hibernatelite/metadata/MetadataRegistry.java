@@ -1,5 +1,7 @@
 package me.pfzh.hibernatelite.metadata;
 
+import me.pfzh.hibernatelite.exception.HibernateLiteException;
+
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,14 +37,21 @@ public final class MetadataRegistry {
      * {@link EntityMeta} instance is created by performing reflection
      * scanning.</p>
      *
-     * @param entityClass entity class
+     * <p>If the entity class is invalid (no {@code @Id}, or multiple
+     * {@code @Id} fields), the construction of {@link EntityMeta} will
+     * throw a {@link HibernateLiteException}. In that case, nothing is
+     * cached, and the next call will retry the reflection scan.</p>
+     *
+     * @param entityClass entity class; must not be {@code null}
      * @return cached entity metadata
      *
-     * @throws IllegalArgumentException if {@code entityClass} is null
+     * @throws IllegalArgumentException if {@code entityClass} is {@code null}
+     * @throws HibernateLiteException if the entity class has no {@code @Id}
+     *                                or declares multiple {@code @Id} fields
      */
     public EntityMeta get(Class<?> entityClass) {
         if (entityClass == null) {
-            throw new IllegalArgumentException("entityClass 不能为 null");
+            throw new IllegalArgumentException("entityClass cannot be null");
         }
         return cache.computeIfAbsent(entityClass, EntityMeta::new);
     }

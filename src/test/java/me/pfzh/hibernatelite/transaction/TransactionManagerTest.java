@@ -37,14 +37,27 @@ class TransactionManagerTest {
 
     @AfterEach
     void cleanup() {
+        // SessionContext.reset() is package-private in the internal package,
+        // so we use the public rollback() to clean up any leftover context.
         SessionContext.rollback();
     }
+
+    // ==================== 基本路径 ====================
 
     @Test
     void execute_normal_commitsAndReturnsResult() {
         String result = txManager.execute(() -> "ok");
 
         assertEquals("ok", result);
+        verify(tx, times(1)).commit();
+        verify(tx, never()).rollback();
+    }
+
+    @Test
+    void execute_returnsNull_whenCallbackReturnsNull() {
+        Object result = txManager.execute(() -> null);
+
+        assertNull(result);
         verify(tx, times(1)).commit();
         verify(tx, never()).rollback();
     }
@@ -62,6 +75,8 @@ class TransactionManagerTest {
         verify(tx, never()).commit();
     }
 
+    // ==================== 嵌套 ====================
+
     @Test
     void execute_nested_usesOuterTransaction() {
         AtomicBoolean innerRan = new AtomicBoolean(false);
@@ -77,10 +92,22 @@ class TransactionManagerTest {
         assertTrue(innerRan.get());
         verify(session, times(1)).beginTransaction();
         verify(tx, times(1)).commit();
+        verify(tx, never()).rollback();
     }
 
     @Test
-    void execute_innerException_rollsBackWholeOuter() {
+    void execute_nested_innerDoesNotCommit() {
+        txManager.execute(() -> {
+            txManager.execute(() -> "inner");
+            // 内层已执行完，但外层还未提交
+            verify(tx, never()).commit();
+            return "outer";
+        });
+        verify(tx, times(1)).commit();
+    }
+
+    @Test
+    void execute_nested_innerException_marksRollbackOnlyAndOuterRollsBack() {
         assertThrows(RuntimeException.class, () ->
                 txManager.execute(() -> {
                     txManager.execute(() -> { throw new RuntimeException("inner"); });
@@ -88,9 +115,27 @@ class TransactionManagerTest {
                 })
         );
 
+        // 内层只标记 rollback-only
+        verify(tx, times(1)).markRollbackOnly();
+        // 外层真正回滚
         verify(tx, times(1)).rollback();
         verify(tx, never()).commit();
     }
+
+    @Test
+    void execute_nested_innerSucceeds_outerFails_rollsBack() {
+        assertThrows(RuntimeException.class, () ->
+                txManager.execute(() -> {
+                    txManager.execute(() -> "inner");
+                    throw new RuntimeException("outer");
+                })
+        );
+
+        verify(tx, times(1)).rollback();
+        verify(tx, never()).commit();
+    }
+
+    // ==================== 参数校验 ====================
 
     @Test
     void execute_nullCallback_throws() {

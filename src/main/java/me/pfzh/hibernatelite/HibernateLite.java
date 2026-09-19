@@ -15,7 +15,6 @@ import javax.sql.DataSource;
 import java.util.Objects;
 import java.util.Properties;
 
-
 /**
  * Entry point for bootstrapping Hibernate-Lite.
  *
@@ -143,19 +142,20 @@ public final class HibernateLite {
 
             // Create the Hibernate core factory.
             SessionFactory sessionFactory = buildSessionFactory();
-
-            // Wrap SessionFactory to centralize lifecycle management.
-            SessionFactoryHolder holder = new SessionFactoryHolder(sessionFactory);
-
-            // Shared metadata registry for the DataStore lifecycle.
-            MetadataRegistry metadataRegistry = new MetadataRegistry();
-
-            // Components share the same SessionFactory holder and metadata registry.
-            CrudExecutor crud = new CrudExecutor(holder, metadataRegistry);
-            TransactionManager tx = new TransactionManager(holder);
-
-            // Expose simplified API to users.
-            return new DataStoreImpl(crud, tx, holder);
+            try {
+                // Wrap SessionFactory to centralize lifecycle management.
+                SessionFactoryHolder holder = new SessionFactoryHolder(sessionFactory);
+                // Shared metadata registry for the DataStore lifecycle.
+                MetadataRegistry metadataRegistry = new MetadataRegistry();
+                // Components share the same SessionFactory holder and metadata registry.
+                CrudExecutor crud = new CrudExecutor(holder, metadataRegistry);
+                TransactionManager tx = new TransactionManager(holder);
+                // Expose simplified API to users.
+                return new DataStoreImpl(crud, tx, holder);
+            } catch (RuntimeException e) {
+                sessionFactory.close();
+                throw e;
+            }
         }
 
         /**

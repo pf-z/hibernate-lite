@@ -1,8 +1,10 @@
 package me.pfzh.hibernatelite.internal;
 
+import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.Transaction;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -139,4 +141,19 @@ class SessionContextTest {
         SessionContext.current(sf);
         verify(sf, times(2)).openSession();
     }
+
+    @Test
+    void commit_whenMarkedRollback_rollsBackAndThrows() {
+        when(tx.getStatus()).thenReturn(TransactionStatus.MARKED_ROLLBACK);
+
+        SessionContext.begin(sf);
+
+        assertThrows(HibernateLiteException.class, SessionContext::commit);
+
+        verify(tx, times(1)).rollback();
+        verify(tx, never()).commit();
+        verify(session, times(1)).close();
+        assertFalse(SessionContext.inTransaction());
+    }
+
 }

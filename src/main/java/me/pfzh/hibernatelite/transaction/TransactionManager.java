@@ -1,49 +1,87 @@
 package me.pfzh.hibernatelite.transaction;
 
+import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.internal.SessionContext;
 import me.pfzh.hibernatelite.internal.SessionFactoryHolder;
 
 import java.util.Objects;
 
 /**
- * 编程式事务管理器。
+ * Programmatic transaction manager.
  *
- * <p>提供最简单的事务语义：在回调内执行用户逻辑，
- * 正常返回则提交，抛异常则回滚。</p>
+ * <p>Provides the simplest transaction semantics: the user logic is
+ * executed inside the callback, committed on normal return, and rolled
+ * back when a {@link RuntimeException} is thrown.</p>
  *
- * <p><b>嵌套行为</b>：若当前线程已在事务中，再次调用 {@code execute}
- * 不会开启新事务，而是复用外层事务（REQUIRED 语义）。这是由
- * {@link SessionContext} 的 depth 计数实现的，本类不感知。</p>
+ * <p><b>Nesting behavior (REQUIRED semantics):</b> if the current thread
+ * is already inside a transaction, calling {@link #execute} does not start
+ * a new one. The callback simply participates in the outer transaction.
+ * Only the outermost transaction performs the real commit or rollback.</p>
  *
- * <p><b>异常传播</b>：只捕获 {@link RuntimeException}。用户抛出什么，
- * 回滚后原样抛回，不包装（除非回滚本身失败）。</p>
+ * <p><b>Rollback propagation:</b> when a nested callback fails, the outer
+ * transaction is not rolled back immediately. Instead, it is marked as
+ * rollback-only, and the outermost commit will roll back and throw
+ * {@link HibernateLiteException}.</p>
+ *
+ * <p><b>Exception propagation:</b> only {@link RuntimeException} is caught.
+ * The original exception is rethrown unchanged after rollback;
+ * it is never wrapped.</p>
+ *
+ * @author Pengfei Zhang
+ * @since 2026/9/18
  */
 public final class TransactionManager {
 
     private final SessionFactoryHolder factoryHolder;
 
+    /**
+     * Creates a transaction manager.
+     *
+     * @param factoryHolder provides access to the global SessionFactory;
+     *                      must not be {@code null}
+     */
     public TransactionManager(SessionFactoryHolder factoryHolder) {
         this.factoryHolder = Objects.requireNonNull(factoryHolder,
-                "SessionFactoryHolder 不能为 null");
+                "factoryHolder cannot be null");
     }
 
     /**
-     * 在事务中执行回调。
+     * Executes the callback inside a transaction.
      *
-     * <p>正常返回 → 提交。</p>
-     * <p>抛 {@link RuntimeException} → 回滚并原样抛出。</p>
+     * <p>If no transaction is active on the current thread, a new one
+     * is started and committed (or rolled back on failure).</p>
      *
-     * @param callback 事务内逻辑，不可为 null
+     * <p>If a transaction is already active, the callback participates
+     * in it. On failure, the outer transaction is marked as
+     * rollback-only instead of being rolled back immediately.</p>
+     *
+     * @param callback the transactional operation; must not be {@code null}
+     * @param <T>      callback result type
+     * @return the callback result; may be {@code null}
+     *
+     * @throws IllegalArgumentException if {@code callback} is {@code null}
+     * @throws RuntimeException if the callback fails; the original
+     *                          exception is rethrown unchanged
      */
     public <T> T execute(TransactionCallback<T> callback) {
-        Objects.requireNonNull(callback, "TransactionCallback 不能为 null");
-        SessionContext.begin(factoryHolder.get());
+        Objects.requireNonNull(callback, "callback cannot be null");
+
+        boolean autoTx = !SessionContext.inTransaction();
+        if (autoTx) {
+            SessionContext.begin(factoryHolder.get());
+        }
         try {
             T result = callback.execute();
-            SessionContext.commit();
+            if (autoTx) {
+                SessionContext.commit();
+            }
             return result;
         } catch (RuntimeException e) {
-            SessionContext.rollback();
+            if (autoTx) {
+                SessionContext.rollback();
+            } else {
+                SessionContext.markRollbackOnly();
+            }
             throw e;
         }
     }

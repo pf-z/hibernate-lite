@@ -17,7 +17,7 @@ import java.util.List;
  * @author Pengfei Zhang
  * @since 2026/9/18
  */
-public interface DataStore {
+public interface DataStore extends AutoCloseable {
 
     /**
      * Finds an entity by its primary key.
@@ -25,6 +25,11 @@ public interface DataStore {
      * <p>
      * If no entity exists with the given identifier,
      * this method returns {@code null}.
+     * </p>
+     *
+     * <p>
+     * If no transaction is active, a short-lived transaction is
+     * started automatically for this read operation.
      * </p>
      *
      * @param type entity class
@@ -42,12 +47,22 @@ public interface DataStore {
      *
      * <ul>
      *     <li>
-     *     ID is {@code null}: create a new database record.
+     *     ID is {@code null}: create a new database record
+     *     using Hibernate {@code persist()}.
      *     </li>
      *
      *     <li>
-     *     ID is not {@code null}: update existing entity
-     *     through Hibernate merge operation.
+     *     ID is not {@code null} and the entity has a generated identifier
+     *     ({@code @GeneratedValue}): update the existing entity
+     *     through Hibernate {@code merge()}.
+     *     </li>
+     *
+     *     <li>
+     *     ID is not {@code null} and the entity uses a business identifier
+     *     (no {@code @GeneratedValue}): automatic save semantics are not
+     *     supported. A {@link HibernateLiteException} is thrown, because
+     *     the identifier alone cannot distinguish a new entity from an
+     *     existing one.
      *     </li>
      * </ul>
      *
@@ -58,8 +73,16 @@ public interface DataStore {
      * instance as the input object.
      * </p>
      *
+     * <p><b>Warning:</b> for entities with a generated identifier,
+     * a non-null ID is treated as a detached entity and merged.
+     * If the ID was assigned manually (not by Hibernate), this may
+     * accidentally UPDATE an existing row instead of INSERTing.
+     * </p>
+     *
      * @param entity entity to persist
      * @return persisted entity
+     * @throws HibernateLiteException if automatic save semantics cannot
+     *                                be determined (e.g. business identifier)
      */
     <T> T save(T entity);
 
@@ -85,7 +108,8 @@ public interface DataStore {
      * </p>
      *
      * @param entities entities to save
-     * @return persisted entities in the same order
+     * @return persisted entities in the same order; entities after a
+     *         batch boundary are detached
      */
     <T> List<T> saveAll(List<T> entities);
 
@@ -94,6 +118,11 @@ public interface DataStore {
      *
      * <p>
      * The operation is executed within the current transaction.
+     * </p>
+     *
+     * <p>
+     * Deletion is idempotent: if no matching record exists,
+     * the method returns silently.
      * </p>
      *
      * @param entity entity to remove
@@ -157,13 +186,22 @@ public interface DataStore {
      *     <li>{@code SessionFactory.class}</li>
      * </ul>
      *
-     * @param type requested underlying type
+     * @param type requested underlying type; must not be {@code null}
      * @param <T> requested type
      * @return underlying Hibernate object
      *
+     * @throws IllegalArgumentException if {@code type} is {@code null}
      * @throws HibernateLiteException
      * if the requested type is unsupported
      */
     <T> T unwrap(Class<T> type);
+
+    /**
+     * Releases the underlying Hibernate SessionFactory and related resources.
+     *
+     * <p>After calling this method, the DataStore must not be used again.</p>
+     */
+    @Override
+    void close();
 
 }

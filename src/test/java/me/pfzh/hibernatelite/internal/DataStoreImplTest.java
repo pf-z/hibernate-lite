@@ -91,7 +91,7 @@ class DataStoreImplTest {
 
     @Test
     void unwrap_nullType_throws() {
-        assertThrows(NullPointerException.class, () -> store.unwrap(null));
+        assertThrows(IllegalArgumentException.class, () -> store.unwrap(null));
     }
 
     @Test
@@ -103,4 +103,23 @@ class DataStoreImplTest {
         assertThrows(NullPointerException.class,
                 () -> new DataStoreImpl(crud, tx, null));
     }
+
+    @Test
+    void close_delegatesToHolder() {
+        store.close();
+
+        verify(sessionFactory, times(1)).isClosed();
+        verify(sessionFactory, times(1)).close();
+    }
+
+    @Test
+    void close_isIdempotent() {
+        when(sessionFactory.isClosed()).thenReturn(false, true);
+
+        store.close();
+        store.close();
+
+        verify(sessionFactory, times(1)).close();
+    }
+
 }

@@ -81,12 +81,7 @@ public final class SessionContext {
         boolean owner;      // true = 本库打开的，负责关闭
     }
 
-    /**
-     * Gets the current thread's Session.
-     *
-     * <p>If no Session exists, a new one is created and bound to the thread.</p>
-     */
-    public static Session current(SessionFactory factory) {
+    private static Holder getOrCreateHolder(SessionFactory factory) {
         Holder h = CURRENT.get();
         if (h == null) {
             h = new Holder();
@@ -94,7 +89,21 @@ public final class SessionContext {
             h.owner = true;
             CURRENT.set(h);
         }
-        return h.session;
+        return h;
+    }
+
+    /**
+     * Gets the current thread's Session.
+     *
+     * <p>If no Session exists, a new one is created and bound to the thread.</p>
+     *
+     * <p><b>Contract:</b> the returned Session is managed by this library.
+     * In non-transactional usage, the caller <b>must</b> invoke
+     * {@link #close()} when done, otherwise the Session remains bound
+     * to the current thread until the thread is reused.</p>
+     */
+    public static Session current(SessionFactory factory) {
+        return getOrCreateHolder(factory).session;
     }
 
     /**
@@ -104,13 +113,7 @@ public final class SessionContext {
      * The actual Hibernate transaction is created only at the outermost level.</p>
      */
     public static void begin(SessionFactory factory) {
-        Holder h = CURRENT.get();
-        if (h == null) {
-            h = new Holder();
-            h.session = factory.openSession();
-            h.owner = true;
-            CURRENT.set(h);
-        }
+        Holder h = getOrCreateHolder(factory);
         if (h.depth == 0) {
             try {
                 h.tx = h.session.beginTransaction();
@@ -169,7 +172,7 @@ public final class SessionContext {
                 h.tx = null;
                 closeIfOwner(h);
             }
-            throw new HibernateLiteException("\"Transaction marked rollback-only");
+            throw new HibernateLiteException("Transaction marked rollback-only");
         }
 
         // Normal transaction commit.
@@ -180,7 +183,6 @@ public final class SessionContext {
         } catch (RuntimeException e) {
             // Commit failure: attempt rollback to restore consistency.
             tryRollback(h);
-            closeIfOwner(h);
             throw new HibernateLiteException("Failed to commit transaction", e);
         } finally {
             // Always release transaction and session resources.
@@ -227,6 +229,18 @@ public final class SessionContext {
     }
 
     /**
+     * Marks transaction as rollback-only internally.
+     */
+    private static void markRollbackOnlyInternal(Holder h) {
+        if (h == null || h.tx == null) return;
+        try {
+            h.tx.markRollbackOnly();
+        } catch (RuntimeException ignored) {
+            // Do not hide the original exception.
+        }
+    }
+
+    /**
      * Checks whether the current thread is inside a transaction.
      */
     public static boolean inTransaction() {
@@ -263,18 +277,6 @@ public final class SessionContext {
             // Ignore cleanup failures during tests.
         }
         closeIfOwner(h);
-    }
-
-    /**
-     * Marks transaction as rollback-only internally.
-     */
-    private static void markRollbackOnlyInternal(Holder h) {
-        if (h == null || h.tx == null) return;
-        try {
-            h.tx.markRollbackOnly();
-        } catch (RuntimeException ignored) {
-            // Do not hide the original exception.
-        }
     }
 
     /**

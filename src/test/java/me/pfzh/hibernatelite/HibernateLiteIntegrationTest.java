@@ -2,9 +2,11 @@ package me.pfzh.hibernatelite;
 
 import com.zaxxer.hikari.HikariDataSource;
 import me.pfzh.hibernatelite.fixture.TestUser;
-import me.pfzh.hibernatelite.internal.SessionContext;
+import org.hibernate.Session;
 import org.hibernate.SessionFactory;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
@@ -18,7 +20,7 @@ class HibernateLiteIntegrationTest {
     @BeforeEach
     void setUp() {
         ds = new HikariDataSource();
-        ds.setJdbcUrl("jdbc:h2:mem:test-" + System.nanoTime() + ";DB_CLOSE_DELAY=-1");
+        ds.setJdbcUrl("jdbc:h2:mem:test-" + System.nanoTime());
         ds.setUsername("sa");
         ds.setPassword("");
         ds.setDriverClassName("org.h2.Driver");
@@ -26,19 +28,19 @@ class HibernateLiteIntegrationTest {
         db = HibernateLite.builder()
                 .dataSource(ds)
                 .entities(TestUser.class)
-                .ddlAuto("update")        // ← 加这行
+                .ddlAuto("update")
                 .build();
     }
 
     @AfterEach
     void tearDown() {
-        // ★ 删掉这行：SessionContext.rollback();
-
         if (db != null) {
-            db.unwrap(SessionFactory.class).close();
+            db.close();
         }
         ds.close();
     }
+
+    // ==================== 基本 CRUD ====================
 
     @Test
     void save_and_find() {
@@ -64,6 +66,9 @@ class HibernateLiteIntegrationTest {
 
         assertEquals(3, result.size());
         result.forEach(u -> assertNotNull(u.getId()));
+        assertEquals("A", result.get(0).getName());
+        assertEquals("B", result.get(1).getName());
+        assertEquals("C", result.get(2).getName());
     }
 
     @Test
@@ -73,6 +78,8 @@ class HibernateLiteIntegrationTest {
 
         assertNull(db.find(TestUser.class, u.getId()));
     }
+
+    // ==================== 事务 ====================
 
     @Test
     void transaction_commits() {
@@ -112,11 +119,14 @@ class HibernateLiteIntegrationTest {
         });
 
         assertEquals("done", result);
-    }
 
-    @Test
-    void unwrap_returnsSessionFactory() {
-        assertNotNull(db.unwrap(SessionFactory.class));
+        // 验证两层 save 都已提交
+        try (Session session = db.unwrap(SessionFactory.class).openSession()) {
+            Long count = session
+                    .createQuery("select count(u) from TestUser u", Long.class)
+                    .getSingleResult();
+            assertEquals(2L, count);
+        }
     }
 
     @Test
@@ -135,12 +145,27 @@ class HibernateLiteIntegrationTest {
                     } catch (RuntimeException ignored) {
                         // 用户吞掉异常
                     }
-                    db.save(new TestUser("Bob"));   // 期望这行也被回滚
+                    db.save(new TestUser("Bob"));
                 })
         );
 
         // Alice 应该还在（内层 delete 被回滚）
         assertNotNull(db.find(TestUser.class, id));
+
+        // Bob 也不应存在（外层整体回滚）
+        try (Session session = db.unwrap(SessionFactory.class).openSession()) {
+            Long bobCount = session
+                    .createQuery("select count(u) from TestUser u where u.name = :n", Long.class)
+                    .setParameter("n", "Bob")
+                    .getSingleResult();
+            assertEquals(0L, bobCount);
+        }
     }
 
+    // ==================== escape hatch ====================
+
+    @Test
+    void unwrap_returnsSessionFactory() {
+        assertNotNull(db.unwrap(SessionFactory.class));
+    }
 }

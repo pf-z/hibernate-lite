@@ -142,15 +142,23 @@ public final class DataStoreImpl implements DataStore {
      *     <li>{@link SessionFactory}</li>
      * </ul>
      *
+     * @throws IllegalArgumentException if {@code type} is {@code null}
      * @throws HibernateLiteException if the requested type is unsupported
      */
     @Override
     public <T> T unwrap(Class<T> type) {
-        Objects.requireNonNull(type, "type cannot be null");
+        if (type == null) {
+            throw new IllegalArgumentException("type cannot be null");
+        }
         if (SessionFactory.class.equals(type)) {
             return type.cast(factoryHolder.get());
         }
         throw new HibernateLiteException("Unsupported unwrap type: " + type.getName());
+    }
+
+    @Override
+    public void close() {
+        factoryHolder.close();
     }
 
 }

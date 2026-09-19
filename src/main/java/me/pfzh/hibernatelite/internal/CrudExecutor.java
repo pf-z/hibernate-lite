@@ -1,6 +1,5 @@
 package me.pfzh.hibernatelite.internal;
 
-import jakarta.persistence.Id;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.metadata.EntityMeta;
 import me.pfzh.hibernatelite.metadata.MetadataRegistry;
@@ -8,7 +7,6 @@ import org.hibernate.HibernateException;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
@@ -70,6 +68,10 @@ public final class CrudExecutor {
      * <p>The Session is obtained from the current thread context.
      * If no transaction exists, a temporary transaction is created
      * automatically.</p>
+     *
+     * <p><b>Note:</b> read-only queries currently also start a short-lived
+     * transaction. This is correct but slightly heavier than a pure
+     * read-only connection. A dedicated read-only path may be added later.</p>
      */
     public <T> T find(Class<T> type, Object id) {
         requireNonNull(type, "entity type");
@@ -87,9 +89,21 @@ public final class CrudExecutor {
      *     <li>ID is null:
      *     execute {@code persist()} for a new entity.</li>
      *
-     *     <li>ID exists:
-     *     execute {@code merge()} for detached entity.</li>
+     *     <li>ID is not null and the entity has a generated identifier
+     *     ({@code @GeneratedValue}):
+     *     execute {@code merge()} for a detached entity.
+     *     <b>Note:</b> {@code merge()} may issue an UPDATE if a row with
+     *     that identifier already exists. Do not pass an entity with a
+     *     manually assigned identifier unless you intend an update.</li>
+     *
+     *     <li>ID is not null and the entity uses a business identifier
+     *     (no {@code @GeneratedValue}):
+     *     automatic save semantics are not supported, and a
+     *     {@link HibernateLiteException} is thrown.</li>
      * </ul>
+     *
+     * <p>If you need explicit control, use {@code persist} / {@code merge}
+     * semantics directly through a Hibernate {@code Session}.</p>
      */
     public <T> T save(T entity) {
         requireNonNull(entity, "entity");
@@ -102,7 +116,15 @@ public final class CrudExecutor {
      *
      * <p>Entities are processed in batches.
      * Every {@link #BATCH_SIZE} entities Hibernate is flushed
-     * and persistence context is cleared.</p>
+     * and the persistence context is cleared.</p>
+     *
+     * <p><b>Warning:</b> after each batch boundary, previously saved
+     * entities become <b>detached</b>. Do not rely on lazy associations
+     * of the returned entities after calling this method.</p>
+     *
+     * @param entities entities to save; must not be {@code null}
+     * @param <T>      entity type
+     * @return the saved entities, in the same order as the input
      */
     public <T> List<T> saveAll(List<T> entities) {
         requireNonNull(entities, "entity list");
@@ -124,7 +146,7 @@ public final class CrudExecutor {
     public void delete(Object entity) {
         requireNonNull(entity, "entity");
         wrap("delete", () -> {
-            execute(() -> {
+            executeVoid(() -> {
                 Session session = SessionContext.current(factoryHolder.get());
 
                 /*
@@ -133,7 +155,7 @@ public final class CrudExecutor {
                  */
                 if (session.contains(entity)) {
                     session.remove(entity);
-                    return null;
+                    return;
                 }
 
                 /*
@@ -154,10 +176,9 @@ public final class CrudExecutor {
                  * Delete is treated as idempotent.
                  */
                 if (managed == null) {
-                    return null;
+                    return;
                 }
                 session.remove(managed);
-                return null;
             });
             return null;
         });
@@ -191,10 +212,13 @@ public final class CrudExecutor {
             return result;
         } catch (RuntimeException e) {
             /*
-             * If this method owns the transaction,
-             * rollback immediately.
-             *
+             * If this method owns the transaction, rollback immediately.
              * Otherwise mark the outer transaction as rollback-only.
+             *
+             * Note: if the exception originated from SessionContext.commit(),
+             * the context has already been cleaned up internally, and the
+             * rollback() call below is a no-op. It is kept here to cover
+             * failures raised by the action itself.
              */
             if (autoTx) {
                 SessionContext.rollback();
@@ -203,6 +227,19 @@ public final class CrudExecutor {
             }
             throw e;
         }
+    }
+
+    /**
+     * Executes a void operation with automatic transaction handling.
+     *
+     * <p>Convenience overload of {@link #execute(Supplier)} for operations
+     * that do not return a value.</p>
+     */
+    private void executeVoid(Runnable action) {
+        execute(() -> {
+            action.run();
+            return null;
+        });
     }
 
     /**
@@ -225,32 +262,18 @@ public final class CrudExecutor {
      *
      * <p>The persistence strategy depends on the identifier state:</p>
      * <ul>
-     *     <li>
-     *         If the identifier is {@code null}, the entity is treated as a new
-     *         entity and persisted using {@link Session#persist(Object)}.
-     *     </li>
-     *     <li>
-     *         If the entity uses {@link jakarta.persistence.GeneratedValue} and
-     *         the identifier is not {@code null}, the entity is treated as an
-     *         existing entity and merged using {@link Session#merge(Object)}.
-     *     </li>
-     *     <li>
-     *         For entities with business identifiers (without
-     *         {@code @GeneratedValue}), the identifier value alone cannot
-     *         distinguish between a new entity and an existing entity.
-     *         Therefore, automatic save semantics are not supported.
-     *     </li>
+     *     <li>ID is {@code null}: {@link Session#persist(Object)}.</li>
+     *     <li>ID is not {@code null} and the entity has a generated identifier:
+     *     {@link Session#merge(Object)}. This may trigger an UPDATE.</li>
+     *     <li>ID is not {@code null} and the entity uses a business identifier:
+     *     a {@link HibernateLiteException} is thrown, because new vs. existing
+     *     cannot be determined from the identifier alone.</li>
      * </ul>
      *
-     * <p>This method intentionally avoids guessing persistence state for
-     * business-key entities to prevent unintended insert/update behavior.</p>
-     *
      * @param session current Hibernate session
-     * @param entity entity instance to save
-     * @param <T> entity type
-     *
+     * @param entity  entity instance to save
+     * @param <T>     entity type
      * @return the persisted or merged entity
-     *
      * @throws HibernateLiteException if the entity uses a business identifier
      *                                and automatic save semantics cannot be
      *                                determined
@@ -268,9 +291,9 @@ public final class CrudExecutor {
         // whether the entity is new or already persistent.
         if (!meta.hasGeneratedId()) {
             throw new HibernateLiteException(
-                    "Business identifier entity (without @GeneratedValue) does not support automatic save semantics: "
-                            + entity.getClass().getName()
-                            + ". Please explicitly choose persist or merge semantics (not supported in the current version).");
+                    "Cannot determine save semantics for entity with business identifier "
+                            + "(no @GeneratedValue): " + entity.getClass().getName()
+                            + ". Use Session#persist or Session#merge explicitly.");
         }
 
         return (T) session.merge(entity);
