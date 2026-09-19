@@ -3,34 +3,48 @@ package me.pfzh.hibernatelite.query;
 /**
  * Supported query operators.
  *
- * <p>Each operator maps to a JPA Criteria predicate in
- * {@code QueryBuilder}.</p>
+ * <p>Each operator is translated into a corresponding JPA Criteria
+ * predicate by {@code QueryBuilder}.</p>
+ *
+ * @author Pengfei Zhang
+ * @since 2026/9/19
  */
 enum Operator {
 
-    /** {@code =} */
+    /** Equal to ({@code =}). */
     EQ,
-    /** {@code <>} */
+
+    /** Not equal to ({@code <>}). */
     NE,
-    /** {@code >} */
+
+    /** Greater than ({@code >}). */
     GT,
-    /** {@code >=} */
+
+    /** Greater than or equal to ({@code >=}). */
     GE,
-    /** {@code <} */
+
+    /** Less than ({@code <}). */
     LT,
-    /** {@code <=} */
+
+    /** Less than or equal to ({@code <=}). */
     LE,
-    /** {@code LIKE} */
+
+    /** Pattern matching ({@code LIKE}). */
     LIKE,
-    /** {@code IN} */
+
+    /** Value is contained in a collection ({@code IN}). */
     IN,
-    /** {@code NOT IN} */
+
+    /** Value is not contained in a collection ({@code NOT IN}). */
     NOT_IN,
-    /** {@code IS NULL} */
+
+    /** Value is null ({@code IS NULL}). */
     IS_NULL,
-    /** {@code IS NOT NULL} */
+
+    /** Value is not null ({@code IS NOT NULL}). */
     IS_NOT_NULL,
-    /** {@code BETWEEN} */
+
+    /** Value falls within a range ({@code BETWEEN}). */
     BETWEEN
 
 }
