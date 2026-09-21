@@ -91,6 +91,27 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- 分析工具依赖 -->
+        <dependency>
+            <groupId>com.github.javaparser</groupId>
+            <artifactId>javaparser-core</artifactId>
+            <version>3.25.10</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.javaparser</groupId>
+            <artifactId>javaparser-symbol-solver-core</artifactId>
+            <version>3.25.10</version>
+        </dependency>
+        <dependency>
+            <groupId>net.sourceforge.plantuml</groupId>
+            <artifactId>plantuml</artifactId>
+            <version>1.2023.12</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.17.2</version>
+        </dependency>
     </dependencies>
 
     <build>
@@ -101,17 +122,53 @@
                 <version>3.5.2</version>
             </plugin>
 
+            <!-- 生成 Javadoc HTML -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>generate-javadoc</id>
+                        <phase>package</phase>
+                        <goals><goal>javadoc</goal></goals>
+                    </execution>
+                </executions>
                 <configuration>
-                    <doclet>nl.talsmasoftware.umldoclet.UMLDoclet</doclet>
-                    <docletArtifact>
-                        <groupId>nl.talsmasoftware</groupId>
-                        <artifactId>umldoclet</artifactId>
-                        <version>2.3.2</version>
-                    </docletArtifact>
+                    <docfilessubdirs>true</docfilessubdirs>
+                    <quiet>true</quiet>
+                    <!-- 排除指定的包 -->
+                    <excludePackageNames>
+                        me.pfzh.hibernatelite.arch
+                    </excludePackageNames>
+                    <!-- 强制英文界面 -->
+                    <locale>en_US</locale>
+                    <additionalJOptions>
+                        <additionalJOption>-J-Duser.language=en</additionalJOption>
+                        <additionalJOption>-J-Duser.country=US</additionalJOption>
+                    </additionalJOptions>
                 </configuration>
+            </plugin>
+
+            <!-- 分析源码 + 生成 SVG + 注入到 HTML -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>inject-diagrams</id>
+                        <phase>verify</phase>
+                        <goals><goal>java</goal></goals>
+                        <configuration>
+                            <mainClass>me.pfzh.hibernatelite.arch.ArchMain</mainClass>
+                            <arguments>
+                                <argument>me.pfzh.hibernatelite</argument>
+                            </arguments>
+                            <classpathScope>runtime</classpathScope>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
