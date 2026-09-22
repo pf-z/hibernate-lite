@@ -22,6 +22,9 @@ import java.util.stream.Stream;
  *       → {@code doc-files/overview-dependencies.svg}</li>
  * </ul>
  *
+ * <p>Every injected diagram carries a small toggle button that switches
+ * between fit-to-width (default) and original size (horizontal scrolling).</p>
+ *
  * @author Pengfei Zhang
  * @since 2026/9/21
  */
@@ -170,26 +173,22 @@ class JavadocInjector {
         Document doc = parse(htmlFile);
         if (doc.selectFirst("img.uml-overview-diagram") != null) return false;
 
-        Element wrapper = doc.createElement("div");
-        wrapper.addClass("uml-diagram");
-        wrapper.attr("style", "text-align:center; margin:0;");
-
-        Element img = wrapper.appendElement("img");
-        img.addClass("uml-overview-diagram");
-        img.attr("src", "doc-files/overview-dependencies.svg");
-        img.attr("alt", "Overview dependency diagram");
-        img.attr("style", "display:block; max-width:100%; margin:0 auto;");
-
-        // Primary: insert right after <div class="header"> (contains <h1 class="title">).
+        // Preferred: insert right after <div class="header"> (contains <h1 class="title">).
         Element title = doc.selectFirst("h1.title");
         if (title != null) {
             Element header = title.parent();
             if (header != null) {
+                Element wrapper = doc.createElement("div");
                 header.after(wrapper);
+                appendImage(wrapper, "doc-files/overview-dependencies.svg",
+                        "uml-overview-diagram", "Overview dependency diagram");
                 Files.writeString(htmlFile, doc.outerHtml());
                 return true;
             }
+            Element wrapper = doc.createElement("div");
             title.after(wrapper);
+            appendImage(wrapper, "doc-files/overview-dependencies.svg",
+                    "uml-overview-diagram", "Overview dependency diagram");
             Files.writeString(htmlFile, doc.outerHtml());
             return true;
         }
@@ -201,7 +200,9 @@ class JavadocInjector {
         if (content == null) content = doc.body();
         if (content == null) return false;
 
-        content.insertChildren(0, wrapper);
+        appendImage(content, "doc-files/overview-dependencies.svg",
+                "uml-overview-diagram", "Overview dependency diagram");
+
         Files.writeString(htmlFile, doc.outerHtml());
         return true;
     }
@@ -219,15 +220,43 @@ class JavadocInjector {
     }
 
     /**
-     * Appends a centered, borderless diagram image to the given element.
+     * Appends a centered, borderless diagram image to the given element,
+     * together with a small toggle button that switches between fit-to-width
+     * (default) and original size (horizontal scrolling).
      */
     private void appendImage(Element target, String src, String cssClass, String alt) {
+        String imgId  = "uml-img-" + Math.abs(src.hashCode());
+        String wrapId = imgId + "-wrap";
+
         Element wrapper = target.appendElement("div");
         wrapper.addClass("uml-diagram");
-        wrapper.attr("style", "text-align:center; margin-top:0;");
+        wrapper.attr("id", wrapId);
+        wrapper.attr("style",
+                "text-align:center; margin-top:0; overflow-x:hidden; position:relative;");
+
+        // Shared styles for the toggle link, declared once per wrapper.
+        Element style = wrapper.appendElement("style");
+        style.appendText(
+                ".uml-toggle{"
+                        + "  font-family:inherit;"
+                        + "  font-size:12px;"
+                        + "  color:#3c5a99;"
+                        + "  text-decoration:none;"
+                        + "  cursor:pointer;"
+                        + "  user-select:none;"
+                        + "  padding:2px 4px;"
+                        + "  border-radius:2px;"
+                        + "  transition:background 0.15s ease;"
+                        + "}"
+                        + ".uml-toggle:hover{"
+                        + "  text-decoration:underline;"
+                        + "  background:#eef2f7;"
+                        + "}"
+        );
 
         Element img = wrapper.appendElement("img");
         img.addClass(cssClass);
+        img.attr("id", imgId);
         img.attr("src", src);
         img.attr("alt", alt);
         img.attr("style",
@@ -237,5 +266,55 @@ class JavadocInjector {
                         + "border:none; "
                         + "padding:0; "
                         + "background:transparent;");
+
+        // The toggle is an <a> styled as a link, pinned to the top-left corner
+        // of the image wrapper and draggable within the wrapper bounds.
+        Element btn = wrapper.appendElement("a");
+        btn.addClass("uml-toggle");
+        btn.text("Original Size");
+        btn.attr("style",
+                "position:absolute; left:6px; top:6px; z-index:10;");
+
+        btn.attr("onclick",
+                "if(this.dataset.wasDrag==='1'){this.dataset.wasDrag='0';return false;}"
+                        + "var i=document.getElementById('" + imgId + "');"
+                        + "var w=document.getElementById('" + wrapId + "');"
+                        + "if(i.style.maxWidth==='100%'){"
+                        + "  i.style.maxWidth='none';"
+                        + "  w.style.overflowX='auto';"
+                        + "  this.textContent='Fit Width';"
+                        + "} else {"
+                        + "  i.style.maxWidth='100%';"
+                        + "  w.style.overflowX='hidden';"
+                        + "  this.textContent='Original Size';"
+                        + "}"
+                        + "return false;");
+
+        btn.attr("onpointerdown",
+                "this.setPointerCapture(event.pointerId);"
+                        + "this.dataset.dragX=event.clientX-this.offsetLeft;"
+                        + "this.dataset.dragY=event.clientY-this.offsetTop;"
+                        + "this.dataset.dragging='1';"
+                        + "this.dataset.downX=event.clientX;"
+                        + "this.dataset.downY=event.clientY;"
+                        + "event.preventDefault();"
+                        + "event.stopPropagation();");
+
+        btn.attr("onpointermove",
+                "if(this.dataset.dragging!=='1')return;"
+                        + "var w=document.getElementById('" + wrapId + "');"
+                        + "var x=event.clientX-parseInt(this.dataset.dragX);"
+                        + "var y=event.clientY-parseInt(this.dataset.dragY);"
+                        + "x=Math.max(0,Math.min(x,w.clientWidth-this.offsetWidth));"
+                        + "y=Math.max(0,Math.min(y,w.clientHeight-this.offsetHeight));"
+                        + "this.style.left=x+'px';"
+                        + "this.style.top=y+'px';"
+                        + "this.style.right='auto';");
+
+        btn.attr("onpointerup",
+                "this.dataset.dragging='0';"
+                        + "var dx=Math.abs(event.clientX-parseInt(this.dataset.downX||0));"
+                        + "var dy=Math.abs(event.clientY-parseInt(this.dataset.downY||0));"
+                        + "this.dataset.wasDrag=(dx>3||dy>3)?'1':'0';");
     }
 }
