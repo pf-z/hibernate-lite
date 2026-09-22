@@ -36,6 +36,14 @@ import java.util.stream.Stream;
  *   <li>Local variable declarations inside method bodies</li>
  * </ol>
  *
+ * <p>Each dependency is tagged with one of three kinds, so diagrams can
+ * distinguish them by color:</p>
+ * <ul>
+ *   <li>{@link DepKind#EXTENDS}   — {@code extends} / {@code implements}</li>
+ *   <li>{@link DepKind#SIGNATURE} — method parameter and return types</li>
+ *   <li>{@link DepKind#USAGE}     — {@code new}, local vars, method calls</li>
+ * </ul>
+ *
  * <p>The following are explicitly ignored:</p>
  * <ul>
  *   <li>Field declarations by themselves (unless the field is actually used)</li>
@@ -45,18 +53,34 @@ import java.util.stream.Stream;
  *
  * <p>Three kinds of diagrams are generated:</p>
  * <ul>
- *   <li>Class page:    {@code <ClassName>-dependencies.svg} — current class with
- *                     fields/methods, dependencies shown as name-only nodes.</li>
- *   <li>Package page:  {@code <shortName>-classes.svg} — package-local classes
- *                     and intra-package dependencies.</li>
- *   <li>Overview page: {@code overview-dependencies.svg} — package nodes and
- *                     inter-package dependencies.</li>
+ *   <li>Class page:    {@code <ClassName>-dependencies.svg}</li>
+ *   <li>Package page:  {@code <shortName>-classes.svg}</li>
+ *   <li>Overview page: {@code overview-dependencies.svg}</li>
  * </ul>
  *
  * @author Pengfei Zhang
  * @since 2026/9/21
  */
 class DependencyAnalyzer {
+
+    // ==================== Dependency kinds ====================
+
+    /** Kind of dependency between two classes. */
+    enum DepKind {
+        /** {@code extends} / {@code implements}. */
+        EXTENDS,
+        /** Method parameter / return type. */
+        SIGNATURE,
+        /** {@code new}, local var, method call. */
+        USAGE
+    }
+
+    // Colors used for the three dependency kinds.
+    // Hue, lightness and saturation are all separated so the three are
+    // distinguishable even in thumbnail view or grayscale print.
+    private static final String COLOR_EXTENDS   = "#F9A825";   // bright red     (hue 0°,   medium)
+    private static final String COLOR_SIGNATURE = "#0277BD";   // deep sky blue  (hue 200°, dark)
+    private static final String COLOR_USAGE     = "#D32F2F";   // amber          (hue 45°,  bright)
 
     private final Path sourceDir;
     private final Path outputDir;
@@ -66,8 +90,11 @@ class DependencyAnalyzer {
     private final Map<String, ClassInfo> classInfos = new LinkedHashMap<>();
     /** Package name -> set of FQNs in this package */
     private final Map<String, Set<String>> packageClasses = new LinkedHashMap<>();
-    /** FQN -> set of dependency FQNs */
+    /** FQN -> set of dependency FQNs (flat union) */
     private final Map<String, Set<String>> classDependencies = new LinkedHashMap<>();
+    /** FQN -> kind -> set of dependency FQNs (kind-aware) */
+    private final Map<String, Map<DepKind, Set<String>>> classDependenciesByKind
+            = new LinkedHashMap<>();
     /** All FQNs belonging to this project */
     private final Set<String> projectClasses = new HashSet<>();
 
@@ -167,17 +194,13 @@ class DependencyAnalyzer {
                 info.packageName = pkg;
                 info.isInterface = clazz.isInterface();
 
-                Set<String> deps = classDependencies.computeIfAbsent(fqn,
-                        k -> new LinkedHashSet<>());
                 packageClasses.computeIfAbsent(pkg, k -> new LinkedHashSet<>()).add(fqn);
 
-                // (1) extends / implements
-                clazz.getExtendedTypes().forEach(t -> resolveType(t).ifPresent(p -> {
-                    if (!p.equals(fqn)) deps.add(p);
-                }));
-                clazz.getImplementedTypes().forEach(t -> resolveType(t).ifPresent(p -> {
-                    if (!p.equals(fqn)) deps.add(p);
-                }));
+                // (1) extends / implements → EXTENDS
+                clazz.getExtendedTypes().forEach(t -> resolveType(t).ifPresent(p ->
+                        addDependency(fqn, p, DepKind.EXTENDS)));
+                clazz.getImplementedTypes().forEach(t -> resolveType(t).ifPresent(p ->
+                        addDependency(fqn, p, DepKind.EXTENDS)));
 
                 // Fields are rendered but not treated as dependencies.
                 clazz.getFields().forEach(field -> {
@@ -197,27 +220,25 @@ class DependencyAnalyzer {
                     info.methods.add(vis + " " + method.getName()
                             + "(" + params + ") : " + ret);
 
-                    // (2) Return and parameter types
-                    collectTypeAndGenerics(method.getType(), fqn, deps);
+                    // (2) Return / parameter types → SIGNATURE
+                    collectTypeAndGenerics(method.getType(), fqn, DepKind.SIGNATURE);
                     method.getParameters().forEach(p ->
-                            collectTypeAndGenerics(p.getType(), fqn, deps));
+                            collectTypeAndGenerics(p.getType(), fqn, DepKind.SIGNATURE));
 
-                    // (3)(4)(5) Method body
+                    // (3)(4)(5) Method body → USAGE
                     method.getBody().ifPresent(body -> {
                         // (3) new X()
                         body.findAll(ObjectCreationExpr.class).forEach(e ->
-                                resolveType(e.getType()).ifPresent(dep -> {
-                                    if (!dep.equals(fqn)) deps.add(dep);
-                                }));
+                                resolveType(e.getType()).ifPresent(dep ->
+                                        addDependency(fqn, dep, DepKind.USAGE)));
 
                         // (4) Method call receiver type
                         body.findAll(MethodCallExpr.class).forEach(call ->
                                 call.getScope().ifPresent(scope -> {
                                     try {
                                         String qn = scope.calculateResolvedType().describe();
-                                        matchProjectClass(qn).ifPresent(dep -> {
-                                            if (!dep.equals(fqn)) deps.add(dep);
-                                        });
+                                        matchProjectClass(qn).ifPresent(dep ->
+                                                addDependency(fqn, dep, DepKind.USAGE));
                                     } catch (Exception ignored) {
                                         // Unable to resolve the receiver type; skip.
                                     }
@@ -225,9 +246,8 @@ class DependencyAnalyzer {
 
                         // (5) Local variable declarations
                         body.findAll(VariableDeclarator.class).forEach(v ->
-                                resolveType(v.getType()).ifPresent(dep -> {
-                                    if (!dep.equals(fqn)) deps.add(dep);
-                                }));
+                                resolveType(v.getType()).ifPresent(dep ->
+                                        addDependency(fqn, dep, DepKind.USAGE)));
                     });
                 });
             });
@@ -236,18 +256,36 @@ class DependencyAnalyzer {
         }
     }
 
+    // ==================== Dependency recording ====================
+
+    /**
+     * Records a dependency from {@code from} to {@code to} with the given kind.
+     * Updates both the flat union map (for aggregation) and the kind-aware map
+     * (for rendering). Self-dependencies are ignored.
+     */
+    private void addDependency(String from, String to, DepKind kind) {
+        if (from == null || to == null || from.equals(to)) return;
+
+        classDependencies
+                .computeIfAbsent(from, k -> new LinkedHashSet<>())
+                .add(to);
+
+        classDependenciesByKind
+                .computeIfAbsent(from, k -> new LinkedHashMap<>())
+                .computeIfAbsent(kind, k -> new LinkedHashSet<>())
+                .add(to);
+    }
+
     // ==================== Type resolution helpers ====================
 
     /** Collects a type and any generic type arguments (e.g. {@code Page<User>} → Page, User). */
-    private void collectTypeAndGenerics(Type type, String selfFqn, Set<String> deps) {
-        resolveType(type).ifPresent(dep -> {
-            if (!dep.equals(selfFqn)) deps.add(dep);
-        });
+    private void collectTypeAndGenerics(Type type, String from, DepKind kind) {
+        resolveType(type).ifPresent(dep -> addDependency(from, dep, kind));
         if (type instanceof ClassOrInterfaceType ct) {
             ct.getTypeArguments().ifPresent(args -> args.forEach(a ->
-                    collectTypeAndGenerics(a, selfFqn, deps)));
+                    collectTypeAndGenerics(a, from, kind)));
         } else if (type instanceof ArrayType at) {
-            collectTypeAndGenerics(at.getComponentType(), selfFqn, deps);
+            collectTypeAndGenerics(at.getComponentType(), from, kind);
         }
     }
 
@@ -294,6 +332,11 @@ class DependencyAnalyzer {
     /**
      * Generates a per-class diagram where the current class shows its fields
      * and methods, and each dependency is rendered as a name-only node.
+     * Arrows are colored by {@link DepKind}.
+     *
+     * <p>Layout is left to Graphviz (no forced direction), with
+     * {@code linetype polyline} so edges take the shortest path and nodes stay
+     * close together without manual tuning.</p>
      *
      * <p>Output: {@code <package-path>/doc-files/<ClassName>-dependencies.svg}</p>
      */
@@ -308,14 +351,13 @@ class DependencyAnalyzer {
 
             StringBuilder sb = new StringBuilder("@startuml\n");
 
-            // ---------- Layout ----------
-            sb.append("top to bottom direction\n");
-
-            // ---------- Global style ----------
+            // ---------- Global style: auto-compact ----------
             sb.append("skinparam shadowing false\n");
-            sb.append("skinparam linetype ortho\n");
-            sb.append("skinparam nodesep 60\n");
-            sb.append("skinparam ranksep 80\n");
+            sb.append("skinparam linetype polyline\n");
+            sb.append("skinparam nodesep 25\n");
+            sb.append("skinparam ranksep 45\n");
+            sb.append("skinparam padding 4\n");
+            sb.append("skinparam ArrowFontSize 10\n");
 
             sb.append("\n");
 
@@ -365,14 +407,11 @@ class DependencyAnalyzer {
 
             sb.append("\n");
 
-            // ---------- Dependency edges ----------
-            for (String dep : deps) {
-                if (dep.equals(fqn)) continue;
-                sb.append(simple)
-                        .append(" --> ")
-                        .append(simpleName(dep))
-                        .append("\n");
-            }
+            // ---------- Dependency edges, colored by kind ----------
+            appendKindEdges(sb, simple, fqn);
+
+            // ---------- Legend ----------
+            appendLegend(sb);
 
             sb.append("@enduml\n");
 
@@ -395,8 +434,15 @@ class DependencyAnalyzer {
     // ==================== Diagram 2: package-local class diagram ====================
 
     /**
-     * Generates a per-package diagram containing only the classes of that
-     * package and the dependencies among them.
+     * Generates a per-package diagram that includes:
+     * <ul>
+     *   <li>All classes/interfaces declared in this package (simple name).</li>
+     *   <li>Any external class referenced by these classes (fully-qualified name).</li>
+     * </ul>
+     * Arrows are colored by {@link DepKind}.
+     *
+     * <p>Layout is left to Graphviz (no forced direction), with
+     * {@code linetype polyline} for compact routing.</p>
      *
      * <p>Output: {@code <package-path>/doc-files/<shortName>-classes.svg}</p>
      */
@@ -408,13 +454,28 @@ class DependencyAnalyzer {
             Set<String> classes = entry.getValue();
             if (classes.isEmpty()) continue;
 
+            // ---------- 1. Collect external classes ----------
+            Set<String> externalNodes = new LinkedHashSet<>();
+            for (String fqn : classes) {
+                Set<String> deps = classDependencies.getOrDefault(fqn, Collections.emptySet());
+                for (String dep : deps) {
+                    if (dep.equals(fqn)) continue;
+                    if (classes.contains(dep)) continue;
+                    externalNodes.add(dep);
+                }
+            }
+
             StringBuilder sb = new StringBuilder("@startuml\n");
+
+            // Prevent PlantUML from splitting quoted FQNs into nested namespaces.
+            sb.append("set namespaceSeparator none\n");
 
             sb.append("skinparam classAttributeIconSize 0\n");
             sb.append("skinparam shadowing false\n");
-            sb.append("skinparam nodesep 50\n");
-            sb.append("skinparam ranksep 70\n");
-            sb.append("skinparam linetype ortho\n");
+            sb.append("skinparam linetype polyline\n");
+            sb.append("skinparam nodesep 20\n");
+            sb.append("skinparam ranksep 40\n");
+            sb.append("skinparam padding 4\n");
 
             // Show only class/interface names — no fields or methods.
             sb.append("hide members\n");
@@ -423,7 +484,7 @@ class DependencyAnalyzer {
 
             sb.append("\n");
 
-            // Class declarations
+            // ---------- 2. Internal class declarations (simple name) ----------
             for (String fqn : classes) {
                 ClassInfo info = classInfos.get(fqn);
                 String kw = (info != null && info.isInterface) ? "interface" : "class";
@@ -431,21 +492,23 @@ class DependencyAnalyzer {
             }
             sb.append("\n");
 
-            // Intra-package edges only
-            Set<String> edges = new LinkedHashSet<>();
-            for (String fqn : classes) {
-                String from = simpleName(fqn);
-                Set<String> deps = classDependencies.getOrDefault(fqn, Collections.emptySet());
-                for (String dep : deps) {
-                    if (dep.equals(fqn)) continue;
-                    if (!classes.contains(dep)) continue;
-                    String to = simpleName(dep);
-                    String edge = from + " --> " + to;
-                    if (edges.add(edge)) {
-                        sb.append(edge).append("\n");
-                    }
-                }
+            // ---------- 3. External class declarations (quoted FQN) ----------
+            for (String fqn : externalNodes) {
+                ClassInfo info = classInfos.get(fqn);
+                String kw = (info != null && info.isInterface) ? "interface" : "class";
+                sb.append(kw)
+                        .append(" \"")
+                        .append(escape(fqn))
+                        .append("\"\n");
             }
+            sb.append("\n");
+
+            // ---------- 4. Edges, colored by kind ----------
+            appendKindEdgesForPackage(sb, classes);
+
+            // ---------- 5. Legend ----------
+            appendLegend(sb);
+
             sb.append("@enduml\n");
 
             Path docFiles = outputDir.resolve(pkg.replace('.', '/')).resolve("doc-files");
@@ -520,11 +583,11 @@ class DependencyAnalyzer {
         StringBuilder sb = new StringBuilder();
         sb.append("@startuml\n");
 
-        // Global style
+        // Global style: compact routing.
         sb.append("skinparam shadowing false\n");
-        sb.append("skinparam linetype ortho\n");
-        sb.append("skinparam nodesep 30\n");
-        sb.append("skinparam ranksep 55\n");
+        sb.append("skinparam linetype polyline\n");
+        sb.append("skinparam nodesep 25\n");
+        sb.append("skinparam ranksep 45\n");
 
         // Node style
         sb.append("skinparam rectangle {\n");
@@ -576,6 +639,148 @@ class DependencyAnalyzer {
         renderSvg(sb.toString(), docFiles.resolve("overview-dependencies.svg"));
 
         System.out.println("[analysis] Overview diagram generated.");
+    }
+
+    // ==================== Edge rendering helpers ====================
+
+    /**
+     * Appends dependency edges for a single source class, colored by
+     * {@link DepKind}. Each edge carries a short letter label (E / S / U)
+     * so that parallel edges between the same pair of classes remain
+     * distinguishable.
+     *
+     * <p>All relation kinds are preserved: a pair of classes that are linked
+     * by more than one kind will render one edge per kind.</p>
+     */
+    private void appendKindEdges(StringBuilder sb, String fromName, String fromFqn) {
+
+        Map<DepKind, Set<String>> byKind = classDependenciesByKind
+                .getOrDefault(fromFqn, Collections.emptyMap());
+
+        Set<String> drawn = new LinkedHashSet<>();
+
+        // EXTENDS
+        for (String dep : byKind.getOrDefault(DepKind.EXTENDS, Collections.emptySet())) {
+            String target = simpleName(dep);
+            if (drawn.add("E:" + target)) {
+                sb.append(fromName)
+                        .append(" -[").append(COLOR_EXTENDS).append("]-|> ")
+                        .append(target)
+                        .append(" : <color:").append(COLOR_EXTENDS).append(">E</color>\n");
+            }
+        }
+
+        // SIGNATURE
+        for (String dep : byKind.getOrDefault(DepKind.SIGNATURE, Collections.emptySet())) {
+            String target = simpleName(dep);
+            if (drawn.add("S:" + target)) {
+                sb.append(fromName)
+                        .append(" -[").append(COLOR_SIGNATURE).append(",dashed]-|> ")
+                        .append(target)
+                        .append(" : <color:").append(COLOR_SIGNATURE).append(">S</color>\n");
+            }
+        }
+
+        // USAGE
+        for (String dep : byKind.getOrDefault(DepKind.USAGE, Collections.emptySet())) {
+            String target = simpleName(dep);
+            if (drawn.add("U:" + target)) {
+                sb.append(fromName)
+                        .append(" -[").append(COLOR_USAGE).append(",dotted]-|> ")
+                        .append(target)
+                        .append(" : <color:").append(COLOR_USAGE).append(">U</color>\n");
+            }
+        }
+    }
+
+    /**
+     * Appends dependency edges for all classes in a package, colored by
+     * {@link DepKind}. Targets inside the package use their simple name;
+     * external targets use their FQN in quotes. Each edge carries a short
+     * letter label (E / S / U) so parallel edges remain distinguishable.
+     */
+    private void appendKindEdgesForPackage(StringBuilder sb, Set<String> classes) {
+
+        Set<String> drawn = new LinkedHashSet<>();
+
+        for (String fqn : classes) {
+            String fromName = simpleName(fqn);
+
+            Map<DepKind, Set<String>> byKind = classDependenciesByKind
+                    .getOrDefault(fqn, Collections.emptyMap());
+
+            // EXTENDS
+            for (String dep : byKind.getOrDefault(DepKind.EXTENDS, Collections.emptySet())) {
+                String target = classes.contains(dep) ? simpleName(dep) : dep;
+                if (drawn.add("E:" + fromName + "->" + target)) {
+                    sb.append(solidEdge(fromName, target, COLOR_EXTENDS, "E"));
+                }
+            }
+
+            // SIGNATURE
+            for (String dep : byKind.getOrDefault(DepKind.SIGNATURE, Collections.emptySet())) {
+                String target = classes.contains(dep) ? simpleName(dep) : dep;
+                if (drawn.add("S:" + fromName + "->" + target)) {
+                    sb.append(dashedEdge(fromName, target, COLOR_SIGNATURE, "S"));
+                }
+            }
+
+            // USAGE
+            for (String dep : byKind.getOrDefault(DepKind.USAGE, Collections.emptySet())) {
+                String target = classes.contains(dep) ? simpleName(dep) : dep;
+                if (drawn.add("U:" + fromName + "->" + target)) {
+                    sb.append(dottedEdge(fromName, target, COLOR_USAGE, "U"));
+                }
+            }
+        }
+    }
+
+    /** Solid edge — used for EXTENDS. Label letter is colored to match the line. */
+    private String solidEdge(String fromName, String target, String color, String label) {
+        String from = quoteIfNeeded(fromName);
+        String to   = quoteIfNeeded(target);
+        return from + " -[" + color + "]-|> " + to
+                + " : <color:" + color + ">" + label + "</color>\n";
+    }
+
+    /** Dashed edge — used for SIGNATURE. Label letter is colored to match the line. */
+    private String dashedEdge(String fromName, String target, String color, String label) {
+        String from = quoteIfNeeded(fromName);
+        String to   = quoteIfNeeded(target);
+        return from + " -[" + color + ",dashed]-|> " + to
+                + " : <color:" + color + ">" + label + "</color>\n";
+    }
+
+    /** Dotted edge — used for USAGE. Label letter is colored to match the line. */
+    private String dottedEdge(String fromName, String target, String color, String label) {
+        String from = quoteIfNeeded(fromName);
+        String to   = quoteIfNeeded(target);
+        return from + " -[" + color + ",dotted]-|> " + to
+                + " : <color:" + color + ">" + label + "</color>\n";
+    }
+
+    /** Quotes a label if it contains a dot (i.e. looks like an FQN). */
+    private String quoteIfNeeded(String label) {
+        return label.contains(".")
+                ? "\"" + escape(label) + "\""
+                : label;
+    }
+
+    /**
+     * Appends a small legend explaining the three dependency kinds and the
+     * edge labels E / S / U. Colors are referenced from the constants so the
+     * legend stays in sync with the actual edge colors.
+     */
+    private void appendLegend(StringBuilder sb) {
+        sb.append("legend right\n");
+        sb.append("  <b>Dependencies</b>\n");
+        sb.append("  <color:").append(COLOR_EXTENDS)
+                .append(">───▶</color> E : extends / implements\n");
+        sb.append("  <color:").append(COLOR_SIGNATURE)
+                .append(">╌╌╌╌╌▶</color> S : parameter / return\n");
+        sb.append("  <color:").append(COLOR_USAGE)
+                .append(">┈┈┈▶</color> U : usage\n");
+        sb.append("endlegend\n\n");
     }
 
     // ==================== Common helpers ====================
