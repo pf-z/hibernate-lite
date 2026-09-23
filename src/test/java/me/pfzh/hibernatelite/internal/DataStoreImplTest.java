@@ -2,6 +2,8 @@ package me.pfzh.hibernatelite.internal;
 
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.fixture.TestUser;
+import me.pfzh.hibernatelite.query.JpqlExecutor;
+import me.pfzh.hibernatelite.query.JpqlQuery;
 import me.pfzh.hibernatelite.query.QueryExecutor;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
 import me.pfzh.hibernatelite.transaction.TransactionManager;
@@ -18,20 +20,24 @@ class DataStoreImplTest {
 
     private CrudExecutor crud;
     private TransactionManager tx;
+    private QueryExecutor queryExecutor;
+    private JpqlExecutor jpqlExecutor;
     private SessionFactoryHolder holder;
     private SessionFactory sessionFactory;
     private DataStoreImpl store;
-    private QueryExecutor queryExecutor;
 
     @BeforeEach
     void setUp() {
         crud = mock(CrudExecutor.class);
         tx = mock(TransactionManager.class);
+        queryExecutor = mock(QueryExecutor.class);
+        jpqlExecutor = mock(JpqlExecutor.class);
         sessionFactory = mock(SessionFactory.class);
         holder = new SessionFactoryHolder(sessionFactory);
-        queryExecutor = mock(QueryExecutor.class);
-        store = new DataStoreImpl(crud, tx, queryExecutor, holder);
+        store = new DataStoreImpl(crud, tx, queryExecutor, jpqlExecutor, holder);
     }
+
+    // ==================== CRUD 委托 ====================
 
     @Test
     void find_delegatesToCrud() {
@@ -64,6 +70,8 @@ class DataStoreImplTest {
         verify(crud).delete(u);
     }
 
+    // ==================== 事务委托 ====================
+
     @Test
     void transaction_returnsValue() {
         TransactionCallback<String> cb = () -> "ok";
@@ -81,6 +89,47 @@ class DataStoreImplTest {
         verify(tx).execute(any());
     }
 
+    // ==================== query (DSL) ====================
+
+    @Test
+    void query_dsl_returnsLambdaQuery() {
+        var q = store.query(TestUser.class);
+        assertNotNull(q);
+    }
+
+    @Test
+    void query_dsl_nullType_throws() {
+        assertThrows(NullPointerException.class, () -> store.query((Class<TestUser>) null));
+    }
+
+    // ==================== query (JPQL) ====================
+
+    @Test
+    void query_jpql_returnsJpqlQuery() {
+        JpqlQuery<TestUser> q = store.query("SELECT u FROM TestUser u", TestUser.class);
+        assertNotNull(q);
+    }
+
+    @Test
+    void query_jpql_nullJpql_throws() {
+        assertThrows(IllegalArgumentException.class,
+                () -> store.query((String) null, TestUser.class));
+    }
+
+    @Test
+    void query_jpql_blankJpql_throws() {
+        assertThrows(IllegalArgumentException.class,
+                () -> store.query("   ", TestUser.class));
+    }
+
+    @Test
+    void query_jpql_nullResultType_throws() {
+        assertThrows(IllegalArgumentException.class,
+                () -> store.query("SELECT u FROM TestUser u", null));
+    }
+
+    // ==================== unwrap ====================
+
     @Test
     void unwrap_sessionFactory_returnsIt() {
         assertSame(sessionFactory, store.unwrap(SessionFactory.class));
@@ -97,15 +146,23 @@ class DataStoreImplTest {
         assertThrows(IllegalArgumentException.class, () -> store.unwrap(null));
     }
 
+    // ==================== 构造器 ====================
+
     @Test
     void constructor_rejectsNull() {
         assertThrows(NullPointerException.class,
-                () -> new DataStoreImpl(null, tx, queryExecutor, holder));
+                () -> new DataStoreImpl(null, tx, queryExecutor, jpqlExecutor, holder));
         assertThrows(NullPointerException.class,
-                () -> new DataStoreImpl(crud, null, queryExecutor, holder));
+                () -> new DataStoreImpl(crud, null, queryExecutor, jpqlExecutor, holder));
         assertThrows(NullPointerException.class,
-                () -> new DataStoreImpl(crud, tx, queryExecutor, null));
+                () -> new DataStoreImpl(crud, tx, null, jpqlExecutor, holder));
+        assertThrows(NullPointerException.class,
+                () -> new DataStoreImpl(crud, tx, queryExecutor, null, holder));
+        assertThrows(NullPointerException.class,
+                () -> new DataStoreImpl(crud, tx, queryExecutor, jpqlExecutor, null));
     }
+
+    // ==================== close ====================
 
     @Test
     void close_delegatesToHolder() {
@@ -124,5 +181,4 @@ class DataStoreImplTest {
 
         verify(sessionFactory, times(1)).close();
     }
-
 }

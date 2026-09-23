@@ -5,6 +5,7 @@ import me.pfzh.hibernatelite.internal.DataStoreImpl;
 import me.pfzh.hibernatelite.internal.SessionFactoryHolder;
 import me.pfzh.hibernatelite.internal.TransactionTemplate;
 import me.pfzh.hibernatelite.metadata.MetadataRegistry;
+import me.pfzh.hibernatelite.query.JpqlExecutor;
 import me.pfzh.hibernatelite.query.QueryExecutor;
 import me.pfzh.hibernatelite.transaction.TransactionManager;
 import org.hibernate.SessionFactory;
@@ -154,8 +155,9 @@ public final class HibernateLite {
                 CrudExecutor crud = new CrudExecutor(metadataRegistry, txTemplate);
                 TransactionManager tx = new TransactionManager(holder);
                 QueryExecutor query = new QueryExecutor(metadataRegistry, txTemplate);   // ← 新增
+                JpqlExecutor jpql = new JpqlExecutor(txTemplate);              // ← 新增
                 // Expose simplified API to users.
-                return new DataStoreImpl(crud, tx, query, holder);
+                return new DataStoreImpl(crud, tx, query, jpql, holder);
             } catch (RuntimeException e) {
                 sessionFactory.close();
                 throw e;

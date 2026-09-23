@@ -2,6 +2,8 @@ package me.pfzh.hibernatelite.internal;
 
 import me.pfzh.hibernatelite.DataStore;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
+import me.pfzh.hibernatelite.query.JpqlExecutor;
+import me.pfzh.hibernatelite.query.JpqlQuery;
 import me.pfzh.hibernatelite.query.LambdaQuery;
 import me.pfzh.hibernatelite.query.QueryExecutor;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
@@ -51,6 +53,11 @@ public final class DataStoreImpl implements DataStore {
     private final QueryExecutor queryExecutor;          // ← 新增
 
     /**
+     * Executes JPQL queries.
+     */
+    private final JpqlExecutor jpqlExecutor;
+
+    /**
      * Holds the global Hibernate SessionFactory.
      *
      * <p>The SessionFactory is a heavyweight, application-wide object,
@@ -68,11 +75,13 @@ public final class DataStoreImpl implements DataStore {
     public DataStoreImpl(CrudExecutor crud,
                          TransactionManager transactionManager,
                          QueryExecutor queryExecutor,
+                         JpqlExecutor jpqlExecutor,
                          SessionFactoryHolder factoryHolder) {
         this.crud = Objects.requireNonNull(crud, "CrudExecutor cannot be null");
         this.transactionManager = Objects.requireNonNull(
                 transactionManager, "TransactionManager cannot be null");
         this.queryExecutor = Objects.requireNonNull(queryExecutor, "QueryExecutor cannot be null");
+        this.jpqlExecutor = Objects.requireNonNull(jpqlExecutor, "JpqlExecutor cannot be null");
         this.factoryHolder = Objects.requireNonNull(
                 factoryHolder, "SessionFactoryHolder cannot be null");
     }
@@ -171,6 +180,11 @@ public final class DataStoreImpl implements DataStore {
     public <T> LambdaQuery<T> query(Class<T> type) {
         Objects.requireNonNull(type, "type cannot be null");
         return new LambdaQuery<>(type, queryExecutor);
+    }
+
+    @Override
+    public <T> JpqlQuery<T> query(String jpql, Class<T> resultType) {
+        return new JpqlQuery<>(jpql, resultType, jpqlExecutor);
     }
 
 }

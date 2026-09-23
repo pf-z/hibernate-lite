@@ -1,10 +1,6 @@
 package me.pfzh.hibernatelite.query;
 
-import jakarta.persistence.criteria.CriteriaBuilder;
-import jakarta.persistence.criteria.CriteriaDelete;
-import jakarta.persistence.criteria.CriteriaQuery;
-import jakarta.persistence.criteria.Predicate;
-import jakarta.persistence.criteria.Root;
+import jakarta.persistence.criteria.*;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.internal.TransactionTemplate;
 import me.pfzh.hibernatelite.metadata.EntityMeta;
@@ -15,6 +11,7 @@ import org.hibernate.HibernateException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -664,4 +661,64 @@ public final class QueryExecutor {
             throw new IllegalArgumentException("limit must be positive, got: " + limit);
         }
     }
+
+    /**
+     * Updates all entities matching the given conditions.
+     *
+     * <p>The update is executed as a bulk UPDATE statement rather than
+     * loading entities into memory one by one.</p>
+     *
+     * <p>At least one Lambda DSL condition or {@link QuerySpec} is
+     * required. Unconditional updates are rejected to prevent accidental
+     * modification of the entire table.</p>
+     *
+     * @param clazz entity type
+     * @param conditions Lambda DSL conditions
+     * @param specs advanced Criteria predicates
+     * @param updates map of field name to new value
+     * @param <T> entity type
+     * @return number of updated rows
+     * @throws HibernateLiteException if no update restriction is supplied
+     */
+    public <T> int update(Class<T> clazz,
+                          List<QueryCondition> conditions,
+                          List<QuerySpec<T>> specs,
+                          Map<String, Object> updates) {
+        requireClass(clazz);
+
+        if (updates == null || updates.isEmpty()) {
+            throw new IllegalArgumentException("updates cannot be null or empty");
+        }
+
+        // Safety: refuse unconditional update
+        if (conditions.isEmpty() && (specs == null || specs.isEmpty())) {
+            throw new HibernateLiteException(
+                    "update() requires at least one condition or where() clause; "
+                            + "refusing to update all rows of " + clazz.getName());
+        }
+
+        EntityMeta meta = metadataRegistry.get(clazz);
+
+        return wrap("query.update", () -> txTemplate.execute(session -> {
+            CriteriaBuilder cb = session.getCriteriaBuilder();
+            CriteriaUpdate<T> cu = cb.createCriteriaUpdate(clazz);
+            Root<T> root = cu.from(clazz);
+
+            for (Map.Entry<String, Object> e : updates.entrySet()) {
+                if (meta.getField(e.getKey()) == null) {
+                    throw new HibernateLiteException(
+                            "Entity " + clazz.getName() + " has no field: " + e.getKey());
+                }
+                cu.set(root.get(e.getKey()), e.getValue());
+            }
+
+            Predicate where = combine(cb, root, conditions, specs, meta);
+            if (where != null) {
+                cu.where(where);
+            }
+
+            return session.createMutationQuery(cu).executeUpdate();
+        }));
+    }
+
 }

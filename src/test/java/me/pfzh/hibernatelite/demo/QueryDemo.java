@@ -9,9 +9,10 @@ import me.pfzh.hibernatelite.pagination.Page;
 import me.pfzh.hibernatelite.pagination.PageRequest;
 
 import java.util.List;
+import java.util.Map;
 
 /**
- * Hibernate-Lite v0.2.x 完整功能演示。
+ * Hibernate-Lite 完整功能演示。
  *
  * <p>覆盖：</p>
  * <ul>
@@ -19,6 +20,8 @@ import java.util.List;
  *     <li>Query DSL：全部操作符</li>
  *     <li>排序 + 聚合</li>
  *     <li>条件删除 + 安全保护</li>
+ *     <li>条件更新（单字段 / 多字段 / 逃生舱）</li>
+ *     <li>JPQL 查询（参数 / JOIN / 分页）</li>
  *     <li>分页（有 count / 无 count）</li>
  *     <li>逃生舱</li>
  *     <li>事务（提交 / 回滚 / 嵌套）</li>
@@ -41,6 +44,8 @@ public class QueryDemo {
             demoOrderBy(db);
             demoAggregates(db);
             demoConditionalDelete(db);
+            demoConditionalUpdate(db);
+            demoJpql(db);
             demoPaginationWithCount(db);
             demoPaginationWithoutCount(db);
             demoEscapeHatch(db);
@@ -75,7 +80,6 @@ public class QueryDemo {
      * </pre>
      */
     private static void seed(DataStore db) {
-        // 清空已有数据
         if (db.query(TestUser.class).count() > 0) {
             db.query(TestUser.class).isNotNull(TestUser::getName).delete();
         }
@@ -99,15 +103,12 @@ public class QueryDemo {
     private static void demoCrud(DataStore db) {
         System.out.println("\n=== 1. 基本 CRUD ===");
 
-        // 保存
         TestUser u = db.save(new TestUser("TempUser", 20, "ACTIVE"));
         System.out.println("save: id=" + u.getId() + ", name=" + u.getName());
 
-        // 按主键查询
         TestUser found = db.find(TestUser.class, u.getId());
         System.out.println("find: name=" + found.getName());
 
-        // 删除
         db.delete(found);
         System.out.println("delete: find after delete = " + db.find(TestUser.class, u.getId()));
     }
@@ -120,19 +121,16 @@ public class QueryDemo {
         System.out.println("\n=== 2. Query DSL：操作符 ===");
         seed(db);
 
-        // eq
         List<TestUser> active = db.query(TestUser.class)
                 .eq(TestUser::getStatus, "ACTIVE")
                 .list();
         System.out.println("eq status=ACTIVE: " + names(active));
 
-        // ne
         List<TestUser> notAlice = db.query(TestUser.class)
                 .ne(TestUser::getName, "Alice")
                 .list();
         System.out.println("ne name=Alice: " + names(notAlice));
 
-        // gt / ge / lt / le
         List<TestUser> over18 = db.query(TestUser.class)
                 .gt(TestUser::getAge, 18)
                 .list();
@@ -153,31 +151,26 @@ public class QueryDemo {
                 .list();
         System.out.println("le age<=25: " + names(atMost25));
 
-        // like
         List<TestUser> startsWithA = db.query(TestUser.class)
                 .like(TestUser::getName, "A%")
                 .list();
         System.out.println("like 'A%': " + names(startsWithA));
 
-        // in
         List<TestUser> inList = db.query(TestUser.class)
                 .in(TestUser::getName, List.of("Alice", "Bob", "Eve"))
                 .list();
         System.out.println("in {Alice,Bob,Eve}: " + names(inList));
 
-        // notIn
         List<TestUser> notInList = db.query(TestUser.class)
                 .notIn(TestUser::getName, List.of("Alice", "Bob"))
                 .list();
         System.out.println("notIn {Alice,Bob}: " + names(notInList));
 
-        // between
         List<TestUser> between = db.query(TestUser.class)
                 .between(TestUser::getAge, 20, 30)
                 .list();
         System.out.println("between [20,30]: " + names(between));
 
-        // 多条件 AND
         List<TestUser> multi = db.query(TestUser.class)
                 .eq(TestUser::getStatus, "ACTIVE")
                 .gt(TestUser::getAge, 20)
@@ -194,19 +187,16 @@ public class QueryDemo {
         System.out.println("\n=== 3. 排序 ===");
         seed(db);
 
-        // 单字段升序
         List<TestUser> byAgeAsc = db.query(TestUser.class)
                 .orderByAsc(TestUser::getAge)
                 .list();
         System.out.println("orderByAsc age: " + names(byAgeAsc));
 
-        // 单字段降序
         List<TestUser> byAgeDesc = db.query(TestUser.class)
                 .orderByDesc(TestUser::getAge)
                 .list();
         System.out.println("orderByDesc age: " + names(byAgeDesc));
 
-        // 多字段（先 status，后 age）
         List<TestUser> multiOrder = db.query(TestUser.class)
                 .orderByAsc(TestUser::getStatus)
                 .orderByDesc(TestUser::getAge)
@@ -222,7 +212,6 @@ public class QueryDemo {
         System.out.println("\n=== 4. 聚合 ===");
         seed(db);
 
-        // count
         long total = db.query(TestUser.class).count();
         System.out.println("count all: " + total);
 
@@ -231,7 +220,6 @@ public class QueryDemo {
                 .count();
         System.out.println("count status=ACTIVE: " + activeCount);
 
-        // exists
         boolean hasAlice = db.query(TestUser.class)
                 .eq(TestUser::getName, "Alice")
                 .exists();
@@ -242,7 +230,6 @@ public class QueryDemo {
                 .exists();
         System.out.println("exists Zed: " + hasZed);
 
-        // one
         TestUser alice = db.query(TestUser.class)
                 .eq(TestUser::getName, "Alice")
                 .one();
@@ -253,7 +240,6 @@ public class QueryDemo {
                 .one();
         System.out.println("one Zed: " + none);
 
-        // list(limit)
         List<TestUser> top3 = db.query(TestUser.class)
                 .orderByDesc(TestUser::getAge)
                 .list(3);
@@ -268,7 +254,6 @@ public class QueryDemo {
         System.out.println("\n=== 5. 条件删除 ===");
         seed(db);
 
-        // 条件删除
         int deleted = db.query(TestUser.class)
                 .lt(TestUser::getAge, 18)
                 .delete();
@@ -294,35 +279,155 @@ public class QueryDemo {
     }
 
     // ============================================================
-    // 6. 分页（有 count）
+    // 6. 条件更新
+    // ============================================================
+
+    private static void demoConditionalUpdate(DataStore db) {
+        System.out.println("\n=== 6. 条件更新 ===");
+        seed(db);
+
+        // 单字段更新：所有 ACTIVE 且 age < 18 的用户 → MINOR
+        int updated = db.query(TestUser.class)
+                .eq(TestUser::getStatus, "ACTIVE")
+                .lt(TestUser::getAge, 18)
+                .update(TestUser::getStatus, "MINOR");
+        System.out.println("update ACTIVE & age<18 → MINOR: " + updated + " rows");
+
+        long minors = db.query(TestUser.class)
+                .eq(TestUser::getStatus, "MINOR")
+                .count();
+        System.out.println("count MINOR: " + minors);
+
+        // 多字段更新：Charlie → age=31, status=VIP
+        int updated2 = db.query(TestUser.class)
+                .eq(TestUser::getName, "Charlie")
+                .update(Map.of(
+                        "age", 31,
+                        "status", "VIP"
+                ));
+        System.out.println("update Charlie → {age=31, status=VIP}: " + updated2 + " rows");
+
+        TestUser charlie = db.query(TestUser.class)
+                .eq(TestUser::getName, "Charlie")
+                .one();
+        System.out.println("Charlie now: age=" + charlie.getAge()
+                + ", status=" + charlie.getStatus());
+
+        // 逃生舱 + 条件更新：所有 age < 20 → status=TODO
+        int updated3 = db.query(TestUser.class)
+                .where((cb, root) -> cb.lt(root.get("age"), 20))
+                .update(TestUser::getStatus, "TODO");
+        System.out.println("update age<20 (via where) → TODO: " + updated3 + " rows");
+
+        // 安全保护：无条件更新会抛异常
+        try {
+            db.query(TestUser.class).update(TestUser::getStatus, "ALL");
+            System.out.println("unexpected: no exception");
+        } catch (HibernateLiteException e) {
+            System.out.println("unconditional update rejected: " + e.getMessage());
+        }
+    }
+
+    // ============================================================
+    // 7. JPQL 查询
+    // ============================================================
+
+    private static void demoJpql(DataStore db) {
+        System.out.println("\n=== 7. JPQL 查询 ===");
+        seed(db);
+
+        // 基础查询
+        List<TestUser> all = db.query(
+                        "SELECT u FROM TestUser u ORDER BY u.age",
+                        TestUser.class)
+                .list();
+        System.out.println("JPQL all: " + names(all));
+
+        // 带命名参数
+        List<TestUser> active = db.query(
+                        "SELECT u FROM TestUser u WHERE u.status = :status ORDER BY u.age",
+                        TestUser.class)
+                .param("status", "ACTIVE")
+                .list();
+        System.out.println("JPQL status=:status: " + names(active));
+
+        // 多参数
+        List<TestUser> filtered = db.query(
+                        "SELECT u FROM TestUser u WHERE u.status = :status AND u.age > :minAge",
+                        TestUser.class)
+                .param("status", "ACTIVE")
+                .param("minAge", 20)
+                .list();
+        System.out.println("JPQL status=ACTIVE AND age>20: " + names(filtered));
+
+        // 单条
+        TestUser alice = db.query(
+                        "SELECT u FROM TestUser u WHERE u.name = :name",
+                        TestUser.class)
+                .param("name", "Alice")
+                .one();
+        System.out.println("JPQL one Alice: age=" + (alice == null ? null : alice.getAge()));
+
+        // 计数
+        long count = db.query(
+                        "SELECT COUNT(u) FROM TestUser u WHERE u.status = :status",
+                        Long.class)
+                .param("status", "ACTIVE")
+                .count();
+        System.out.println("JPQL count ACTIVE: " + count);
+
+        // 存在
+        boolean exists = db.query(
+                        "SELECT u FROM TestUser u WHERE u.name = :name",
+                        TestUser.class)
+                .param("name", "Alice")
+                .exists();
+        System.out.println("JPQL exists Alice: " + exists);
+
+        // 分页（有 count）
+        Page<TestUser> page = db.query(
+                        "SELECT u FROM TestUser u ORDER BY u.age",
+                        TestUser.class)
+                .page(
+                        "SELECT COUNT(u) FROM TestUser u",
+                        PageRequest.of(0, 3));
+        System.out.println("JPQL page 0: total=" + page.totalElements()
+                + ", content=" + names(page.content()));
+
+        // 分页（无 count）
+        Page<TestUser> slice = db.query(
+                        "SELECT u FROM TestUser u ORDER BY u.age",
+                        TestUser.class)
+                .page(
+                        "SELECT COUNT(u) FROM TestUser u",
+                        PageRequest.of(0, 3).withoutCount());
+        System.out.println("JPQL slice: hasNext=" + slice.hasNext()
+                + ", content=" + names(slice.content()));
+    }
+
+    // ============================================================
+    // 8. 分页（有 count）
     // ============================================================
 
     private static void demoPaginationWithCount(DataStore db) {
-        System.out.println("\n=== 6. 分页（有 count） ===");
+        System.out.println("\n=== 8. 分页（有 count） ===");
         seed(db);
 
-        // 第一页
         Page<TestUser> page0 = db.query(TestUser.class)
                 .orderByAsc(TestUser::getAge)
                 .page(PageRequest.of(0, 3));
-
         printPage(page0);
 
-        // 第二页
         Page<TestUser> page1 = db.query(TestUser.class)
                 .orderByAsc(TestUser::getAge)
                 .page(PageRequest.of(1, 3));
-
         printPage(page1);
 
-        // 第三页（最后一页，可能不满）
         Page<TestUser> page2 = db.query(TestUser.class)
                 .orderByAsc(TestUser::getAge)
                 .page(PageRequest.of(2, 3));
-
         printPage(page2);
 
-        // 带条件的分页
         Page<TestUser> activePage = db.query(TestUser.class)
                 .eq(TestUser::getStatus, "ACTIVE")
                 .orderByDesc(TestUser::getAge)
@@ -331,20 +436,18 @@ public class QueryDemo {
         System.out.println("page with condition status=ACTIVE:");
         printPage(activePage);
 
-        // DTO 映射
         Page<String> namesPage = activePage.map(TestUser::getName);
         System.out.println("mapped to names: " + namesPage.content());
     }
 
     // ============================================================
-    // 7. 分页（无 count，无限滚动）
+    // 9. 分页（无 count，无限滚动）
     // ============================================================
 
     private static void demoPaginationWithoutCount(DataStore db) {
-        System.out.println("\n=== 7. 分页（无 count） ===");
+        System.out.println("\n=== 9. 分页（无 count） ===");
         seed(db);
 
-        // 第 0 页，size=3，无 count
         Page<TestUser> slice0 = db.query(TestUser.class)
                 .orderByAsc(TestUser::getAge)
                 .page(PageRequest.of(0, 3).withoutCount());
@@ -353,7 +456,7 @@ public class QueryDemo {
                 + ", hasTotal=" + slice0.hasTotal()
                 + ", hasNext=" + slice0.hasNext());
 
-        // 最后一页恰好满页（8 条，size=4，第 1 页正好 4 条）
+        // 最后一页恰好满页
         Page<TestUser> slice1 = db.query(TestUser.class)
                 .orderByAsc(TestUser::getAge)
                 .page(PageRequest.of(1, 4).withoutCount());
@@ -362,7 +465,6 @@ public class QueryDemo {
                 + ", hasNext=" + slice1.hasNext()
                 + ", isLast=" + slice1.isLast());
 
-        // totalElements 不可用
         try {
             slice0.totalElements();
             System.out.println("unexpected: no exception");
@@ -373,14 +475,13 @@ public class QueryDemo {
     }
 
     // ============================================================
-    // 8. 逃生舱
+    // 10. 逃生舱
     // ============================================================
 
     private static void demoEscapeHatch(DataStore db) {
-        System.out.println("\n=== 8. 逃生舱 ===");
+        System.out.println("\n=== 10. 逃生舱 ===");
         seed(db);
 
-        // 原生 Criteria
         List<TestUser> startsWithAOrB = db.query(TestUser.class)
                 .where((cb, root) -> cb.or(
                         cb.like(root.get("name"), "A%"),
@@ -389,28 +490,25 @@ public class QueryDemo {
                 .list();
         System.out.println("where(or(like A%, like B%)): " + names(startsWithAOrB));
 
-        // DSL + 逃生舱组合
         List<TestUser> combined = db.query(TestUser.class)
                 .eq(TestUser::getStatus, "ACTIVE")
                 .where((cb, root) -> cb.gt(root.get("age"), 25))
                 .list();
         System.out.println("eq status + where(age>25): " + names(combined));
 
-        // SessionFactory 逃生
         var sessionFactory = db.unwrap(org.hibernate.SessionFactory.class);
         System.out.println("unwrap SessionFactory: "
                 + sessionFactory.getClass().getSimpleName());
     }
 
     // ============================================================
-    // 9. 事务（提交 / 回滚）
+    // 11. 事务（提交 / 回滚）
     // ============================================================
 
     private static void demoTransaction(DataStore db) {
-        System.out.println("\n=== 9. 事务 ===");
+        System.out.println("\n=== 11. 事务 ===");
         seed(db);
 
-        // 提交
         Long id = db.transaction(() -> {
             TestUser u = db.save(new TestUser("TxCommit", 50, "ACTIVE"));
             return u.getId();
@@ -418,7 +516,6 @@ public class QueryDemo {
         System.out.println("commit: saved id=" + id
                 + ", found=" + (db.find(TestUser.class, id) != null));
 
-        // 回滚
         TestUser existing = db.save(new TestUser("TxRollback", 60, "ACTIVE"));
         Long rollbackId = existing.getId();
 
@@ -436,11 +533,11 @@ public class QueryDemo {
     }
 
     // ============================================================
-    // 10. 嵌套事务
+    // 12. 嵌套事务
     // ============================================================
 
     private static void demoNestedTransaction(DataStore db) {
-        System.out.println("\n=== 10. 嵌套事务 ===");
+        System.out.println("\n=== 12. 嵌套事务 ===");
         seed(db);
 
         db.transaction(() -> {
@@ -458,7 +555,6 @@ public class QueryDemo {
                 .count();
         System.out.println("nested commit: all 3 saved = " + (count == 3));
 
-        // 内层失败被吞掉，外层仍回滚
         seed(db);
         try {
             db.transaction(() -> {

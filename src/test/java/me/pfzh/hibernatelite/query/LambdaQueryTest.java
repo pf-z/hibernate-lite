@@ -5,8 +5,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.Mockito.*;
 
 /**
@@ -81,7 +83,7 @@ class LambdaQueryTest {
         assertThrows(IllegalArgumentException.class, () -> query.where(null));
     }
 
-    // ==================== 委托到 executor ====================
+    // ==================== 委托到 executor：查询 ====================
 
     @Test
     void list_delegatesToExecutor() {
@@ -133,8 +135,6 @@ class LambdaQueryTest {
     @Test
     void delete_delegatesToExecutor() {
         when(executor.delete(eq(User.class), anyList(), anyList())).thenReturn(3);
-        //                               ^^^^^^^^^^^^^^^^^^^^^^^
-        //                               delete 现在 3 个参数
 
         assertEquals(3, query.delete());
     }
@@ -153,5 +153,29 @@ class LambdaQueryTest {
     @Test
     void page_nullRequest_throws() {
         assertThrows(IllegalArgumentException.class, () -> query.page(null));
+    }
+
+    // ==================== 委托到 executor：更新 ====================
+
+    @Test
+    void update_singleField_delegatesToExecutor() {
+        when(executor.update(eq(User.class), anyList(), anyList(), anyMap()))
+                .thenReturn(3);
+
+        int result = query.update(User::getName, "updated");
+
+        assertEquals(3, result);
+        verify(executor).update(eq(User.class), anyList(), anyList(), anyMap());
+    }
+
+    @Test
+    void update_map_delegatesToExecutor() {
+        when(executor.update(eq(User.class), anyList(), anyList(), anyMap()))
+                .thenReturn(5);
+
+        int result = query.update(Map.of("name", "x"));
+
+        assertEquals(5, result);
+        verify(executor).update(eq(User.class), anyList(), anyList(), anyMap());
     }
 }

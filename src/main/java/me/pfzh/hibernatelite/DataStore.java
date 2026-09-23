@@ -1,6 +1,7 @@
 package me.pfzh.hibernatelite;
 
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
+import me.pfzh.hibernatelite.query.JpqlQuery;
 import me.pfzh.hibernatelite.query.LambdaQuery;
 import me.pfzh.hibernatelite.transaction.TransactionCallback;
 
@@ -209,5 +210,18 @@ public interface DataStore extends AutoCloseable {
      * Creates a type-safe query for the given entity class.
      */
     <T> LambdaQuery<T> query(Class<T> type);
+
+    /**
+     * Creates a JPQL query for the given result type.
+     *
+     * <p>Named parameters are supplied through
+     * {@link JpqlQuery#param(String, Object)}.</p>
+     *
+     * @param jpql JPQL query string; must not be {@code null} or blank
+     * @param resultType result type; must not be {@code null}
+     * @param <T> result type
+     * @return a JPQL query facade
+     */
+    <T> JpqlQuery<T> query(String jpql, Class<T> resultType);
 
 }

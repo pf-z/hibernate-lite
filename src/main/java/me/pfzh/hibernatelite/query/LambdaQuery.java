@@ -4,9 +4,7 @@ import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.pagination.Page;
 import me.pfzh.hibernatelite.pagination.PageRequest;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
+import java.util.*;
 
 /**
  * Type-safe fluent query DSL for building and executing entity operations.
@@ -345,6 +343,31 @@ public final class LambdaQuery<T> {
     private LambdaQuery<T> add(SFunction<T, ?> field, Operator op, Object value) {
         conditions.add(new QueryCondition(field, op, value));
         return this;
+    }
+
+    /**
+     * Updates a single field for all entities matching the current
+     * conditions.
+     *
+     * @param field field to update
+     * @param value new value
+     * @return number of updated rows
+     */
+    public int update(SFunction<T, ?> field, Object value) {
+        Map<String, Object> updates = new LinkedHashMap<>();
+        updates.put(LambdaResolver.resolve(field), value);
+        return executor.update(entityClass, conditions, specs, updates);
+    }
+
+    /**
+     * Updates multiple fields for all entities matching the current
+     * conditions.
+     *
+     * @param updates map of field name to new value
+     * @return number of updated rows
+     */
+    public int update(Map<String, Object> updates) {
+        return executor.update(entityClass, conditions, specs, updates);
     }
 
 }
