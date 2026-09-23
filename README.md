@@ -33,8 +33,6 @@ Hibernate-Lite is a lightweight ORM layer built on top of Hibernate ORM, designe
 - [Full API Index](#full-api-index)
 - [License](#license)
 
----
-
 ## Overview
 
 Hibernate-Lite removes the boilerplate of DAO / Repository layers while preserving Hibernate's full power underneath.
@@ -82,8 +80,6 @@ db.transaction(() -> {
 });
 ```
 
----
-
 ## Features
 
 - **Zero Repository** — no per-entity DAO boilerplate
@@ -97,8 +93,6 @@ db.transaction(() -> {
 - **Thread-safe by design** — `Session` is bound to `ThreadLocal`, cleaned up automatically
 - **Native Hibernate exceptions wrapped** into `HibernateLiteException`
 - **Escape hatches** — `where(QuerySpec)` and `unwrap(SessionFactory.class)`
-
----
 
 ## Requirements
 
@@ -116,8 +110,6 @@ Supported databases (via Hibernate 6.6 dialects):
 - Oracle 19+
 - SQL Server 2012+
 - H2 2.1+
-
----
 
 ## Installation
 
@@ -138,8 +130,6 @@ mvn clean install
     <version>1.0-SNAPSHOT</version>
 </dependency>
 ```
-
----
 
 ## Quick Start
 
@@ -190,8 +180,6 @@ Long id = db.transaction(() -> {
 });
 ```
 
----
-
 ## API Reference
 
 ### 1. Bootstrap
@@ -229,8 +217,6 @@ try (DataStore db = HibernateLite.builder()...build()) {
 
 - Idempotent — safe to call multiple times
 - After calling `close()`, the `DataStore` must not be used again
-
----
 
 ### 2. CRUD
 
@@ -305,8 +291,6 @@ db.delete(detached);
 ```
 
 - Idempotent — silently returns if no matching record exists
-
----
 
 ### 3. Query DSL
 
@@ -445,8 +429,6 @@ int updated = db.query(User.class)
 
 **Safety guard**: **unconditional update throws an exception**.
 
----
-
 ### 4. JPQL
 
 #### Create a JPQL query
@@ -539,8 +521,6 @@ Page<Order> page = db.query(
 - JPQL syntax error → **Hibernate 6 throws `IllegalArgumentException`**
 - Runtime errors → `HibernateLiteException`
 
----
-
 ### 5. Pagination
 
 #### `PageRequest`
@@ -625,8 +605,6 @@ Page<UserDto> dtos = page.map(UserDto::from);
 
 Preserves: `page`, `size`, `totalElements`, `hasNext`, `hasTotal`.
 
----
-
 ### 6. Transactions
 
 #### Programmatic (with return value)
@@ -700,8 +678,6 @@ The following methods automatically wrap themselves in a transaction when no out
 
 You never need to manage transactions manually for a single operation.
 
----
-
 ### 7. Escape Hatches
 
 #### `where(QuerySpec<T>)` — raw Criteria
@@ -759,8 +735,6 @@ try (Session session = sf.openSession()) {
 - **Bypasses the library's transaction and session management**
 - Inside a `db.transaction(...)`, prefer `SessionContext.current(sf)` over `openSession()`
 
----
-
 ## Error Handling
 
 ### Exception types
@@ -793,8 +767,6 @@ try (Session session = sf.openSession()) {
 - **Library exceptions** → rethrown as-is
 - **Parameter validation exceptions** → thrown directly as `IllegalArgumentException`
 
----
-
 ## Design Principles
 
 1. **Zero boilerplate** — no repository per entity
@@ -807,8 +779,6 @@ try (Session session = sf.openSession()) {
 8. **Production-safe defaults** — `ddlAuto="validate"`, no automatic schema changes
 9. **Safety guards** — unconditional `delete()` and `update()` throw exceptions
 10. **Immutable results** — `Page.content()` is unmodifiable
-
----
 
 ## Full API Index
 
@@ -900,8 +870,6 @@ try (Session session = sf.openSession()) {
 |--------|---------|
 | `toPredicate(CriteriaBuilder, Root<T>)` | `Predicate` |
 
----
-
 ## Testing
 
 ```bash
@@ -920,13 +888,9 @@ The project currently has **270+ tests** covering:
 - Metadata caching
 - Thread binding and session lifecycle
 
----
-
 ## Contributing
 
 Issues and pull requests are welcome.
-
----
 
 ## License
 
