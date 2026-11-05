@@ -116,6 +116,36 @@
 
     <build>
         <plugins>
+            <!--
+              The examples/ directory is compiled as an extra *test* source root:
+                - it uses the same test-scoped dependencies as the test suite
+                  (H2, HikariCP, Logback), so no extra dependency is needed;
+                - it lands in target/test-classes, so examples never ship in the
+                  published jar;
+                - it is compiled by every "mvn test", so the examples cannot rot.
+              Run them with:
+                mvn test-compile exec:java -Dexec.mainClass=...RunAll -Dexec.classpathScope=test
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-example-sources</id>
+                        <phase>generate-test-sources</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>examples/src/main/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>

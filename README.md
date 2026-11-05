@@ -752,6 +752,18 @@ hatches.
 9. **Safety guards** — unconditional `delete()` / `update()` throw
 10. **Fail loudly** — a commit that cannot commit throws; it never reports success
 
+### Examples
+
+Runnable examples for every public API live in `examples/`. They are compiled
+as part of `mvn test` (extra test source root) but are never packaged:
+
+```bash
+mvn test-compile
+mvn exec:java -Dexec.mainClass=me.pfzh.hibernatelite.examples.RunAll -Dexec.classpathScope=test
+```
+
+See [examples/README.md](examples/README.md) for the API coverage matrix.
+
 ## Building and Testing
 
 ```bash
