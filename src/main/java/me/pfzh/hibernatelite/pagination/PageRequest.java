@@ -57,6 +57,14 @@ public final class PageRequest {
             throw new IllegalArgumentException(
                     "size must be in [1, " + MAX_SIZE + "], got: " + size);
         }
+        /*
+         * offset() is an int. Reject requests whose offset would overflow instead
+         * of silently producing a negative value that reaches setFirstResult().
+         */
+        if ((long) page * size > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    "page * size exceeds Integer.MAX_VALUE: page=" + page + ", size=" + size);
+        }
         this.page = page;
         this.size = size;
         this.countTotal = countTotal;

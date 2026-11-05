@@ -125,11 +125,33 @@ public final class JpqlExecutor {
      */
     public long count(String jpql,
                       Map<String, Object> params) {
+        return count(jpql, params, true);
+    }
+
+    /**
+     * Counts rows, optionally tolerating parameters that the count statement does
+     * not declare.
+     *
+     * <p>The tolerant mode exists for {@link #page}: the page statement and the
+     * count statement are written by the caller and may legitimately use different
+     * subsets of the parameter map. Binding a name the statement does not declare
+     * makes Hibernate throw {@code IllegalArgumentException}, even though the
+     * statement itself is perfectly valid.</p>
+     *
+     * @param jpql   JPQL count statement
+     * @param params named parameters
+     * @param strict when {@code true} every entry of {@code params} must be declared
+     *               by {@code jpql}; when {@code false} only declared names are bound
+     * @return row count
+     */
+    private long count(String jpql,
+                       Map<String, Object> params,
+                       boolean strict) {
         requireJpql(jpql);
 
         return wrap("jpql.count", () -> txTemplate.execute(session -> {
             var query = session.createQuery(jpql, Long.class);
-            bindParams(query, params);
+            bindParams(query, params, strict);
             Long result = query.getSingleResult();
             return result == null ? 0L : result;
         }));
@@ -202,7 +224,8 @@ public final class JpqlExecutor {
                     throw new HibernateLiteException(
                             "countJpql must be provided when countTotal is true");
                 }
-                long total = count(countJpql, params);
+                // The count statement may use a different subset of the parameters.
+                long total = count(countJpql, params, false);
                 return Page.of(raw, request, total);
             }
 
@@ -221,11 +244,35 @@ public final class JpqlExecutor {
      */
     private static void bindParams(org.hibernate.query.Query<?> query,
                                    Map<String, Object> params) {
+        bindParams(query, params, true);
+    }
+
+    /**
+     * Binds named parameters onto a Hibernate query.
+     *
+     * @param query  target query
+     * @param params parameter values; may be {@code null} or empty
+     * @param strict when {@code true} every entry must be declared by the query;
+     *               when {@code false} undeclared entries are skipped and only
+     *               parameters actually declared by the query are bound
+     */
+    private static void bindParams(org.hibernate.query.Query<?> query,
+                                   Map<String, Object> params,
+                                   boolean strict) {
         if (params == null || params.isEmpty()) {
             return;
         }
-        for (Map.Entry<String, Object> e : params.entrySet()) {
-            query.setParameter(e.getKey(), e.getValue());
+        if (strict) {
+            for (Map.Entry<String, Object> e : params.entrySet()) {
+                query.setParameter(e.getKey(), e.getValue());
+            }
+            return;
+        }
+        for (var parameter : query.getParameters()) {
+            String name = parameter.getName();
+            if (name != null && params.containsKey(name)) {
+                query.setParameter(name, params.get(name));
+            }
         }
     }
 

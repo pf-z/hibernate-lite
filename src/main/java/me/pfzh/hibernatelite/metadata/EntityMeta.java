@@ -2,6 +2,9 @@ package me.pfzh.hibernatelite.metadata;
 
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.persistence.Transient;
+import org.hibernate.Hibernate;
+import org.hibernate.proxy.HibernateProxy;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 
 import java.lang.reflect.Field;
@@ -101,11 +104,35 @@ public final class EntityMeta {
                     "Invalid entity type: expected " + entityClass.getName()
                             + ", but got " + entity.getClass().getName());
         }
+        /*
+         * A Hibernate proxy does not populate the entity's @Id field until it is
+         * initialised, so a plain reflective read would return null and make the
+         * entity look "new". The lazy initializer knows the identifier without
+         * forcing initialisation.
+         */
+        if (entity instanceof HibernateProxy proxy) {
+            Object identifier = proxy.getHibernateLazyInitializer().getIdentifier();
+            if (identifier != null) {
+                return identifier;
+            }
+        }
         try {
-            return idField.get(entity);
+            return idField.get(unproxy(entity));
         } catch (IllegalAccessException e) {
             throw new HibernateLiteException(
                     "Failed to read @Id field: " + entityClass.getName() + "#" + idField.getName(), e);
+        }
+    }
+
+    /**
+     * Returns the underlying entity instance for a proxy, without initialising it
+     * when the proxy already carries its target.
+     */
+    private static Object unproxy(Object entity) {
+        try {
+            return Hibernate.unproxy(entity);
+        } catch (RuntimeException e) {
+            return entity;
         }
     }
 
@@ -171,7 +198,7 @@ public final class EntityMeta {
             for (Field f : c.getDeclaredFields()) {
                 if (Modifier.isStatic(f.getModifiers())) continue;
                 if (f.isSynthetic()) continue;
-                if (f.isAnnotationPresent(Id.class)) {
+                if (f.isAnnotationPresent(Id.class) && !f.isAnnotationPresent(Transient.class)) {
                     if (found != null) {
                         throw new HibernateLiteException(
                                 "Multiple @Id fields found in entity: " + clazz.getName());
@@ -206,6 +233,12 @@ public final class EntityMeta {
             for (Field f : c.getDeclaredFields()) {
                 if (Modifier.isStatic(f.getModifiers())) continue;
                 if (f.isSynthetic()) continue;
+                /*
+                 * @Transient fields are not persistent attributes. Including them
+                 * made field validation accept names that JPA then rejects much
+                 * later with a far less helpful message.
+                 */
+                if (f.isAnnotationPresent(Transient.class)) continue;
                 f.setAccessible(true);
                 result.put(f.getName(), f);
             }

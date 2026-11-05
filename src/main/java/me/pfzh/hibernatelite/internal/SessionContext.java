@@ -6,6 +6,11 @@ import org.hibernate.SessionFactory;
 import org.hibernate.Transaction;
 import org.hibernate.resource.transaction.spi.TransactionStatus;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * Thread-local Hibernate session and transaction context.
  *
@@ -20,9 +25,13 @@ import org.hibernate.resource.transaction.spi.TransactionStatus;
  *     <li>Release only resources created by this library.</li>
  * </ul>
  *
- * <p>Hibernate does not support true nested transactions.
- * Nested transactions are simulated by delaying commit until the outermost
- * transaction completes.</p>
+ * <p><b>Multiple SessionFactories:</b> state is kept per {@link SessionFactory},
+ * not per thread only. Two {@code DataStore} instances used on the same thread
+ * therefore get independent Sessions and independent transactions; a transaction
+ * opened on one of them never captures operations issued through the other.</p>
+ *
+ * <p>Hibernate does not support true nested transactions. Nested transactions are
+ * simulated by delaying commit until the outermost transaction completes.</p>
  *
  * <p>This is an internal component and should not be used directly by users.</p>
  *
@@ -32,12 +41,19 @@ import org.hibernate.resource.transaction.spi.TransactionStatus;
 public final class SessionContext {
 
     /**
-     * Stores transaction context independently for each thread.
+     * Maps each SessionFactory to the state of the current thread for that factory.
      *
-     * <p>ThreadLocal provides thread isolation, so no additional
-     * synchronization is required.</p>
+     * <p>Using a map (instead of a single holder) is what keeps two
+     * {@code DataStore} instances from sharing one Session.</p>
      */
-    private static final ThreadLocal<Holder> CURRENT = new ThreadLocal<>();
+    private static final ThreadLocal<Map<SessionFactory, Holder>> CURRENT =
+            ThreadLocal.withInitial(HashMap::new);
+
+    /**
+     * Monotonic counter used to identify the most recently begun transaction,
+     * which is what the factory-less convenience methods operate on.
+     */
+    private static final AtomicLong SEQUENCE = new AtomicLong();
 
     /**
      * Utility class.
@@ -46,18 +62,17 @@ public final class SessionContext {
     }
 
     /**
-     * Holds the session and transaction state of the current thread.
+     * Holds the session and transaction state of the current thread for one factory.
      */
     private static final class Holder {
 
-        /**
-         * Hibernate session bound to current thread.
-         */
+        /** Factory owning {@link #session}. */
+        SessionFactory factory;
+
+        /** Hibernate session bound to current thread. */
         Session session;
 
-        /**
-         * Current database transaction.
-         */
+        /** Current database transaction. */
         Transaction tx;
 
         /**
@@ -65,52 +80,58 @@ public final class SessionContext {
          *
          * <p>depth == 0: no active transaction.</p>
          * <p>depth == 1: outermost transaction.</p>
-         * <p>depth > 1: nested transaction.</p>
+         * <p>depth &gt; 1: nested transaction.</p>
          *
          * <p>This counter does not create real nested database transactions.
          * It only controls when the actual commit happens.</p>
          */
         int depth;
 
-        /**
-         * Whether this Session was created by HibernateLite.
-         *
-         * <p>Only sessions owned by this library should be closed here.
-         * External sessions must not be closed by this class.</p>
-         */
-        boolean owner;      // true = 本库打开的，负责关闭
+        /** Whether this Session was created by HibernateLite. */
+        boolean owner;
+
+        /** Order in which the current transaction started. */
+        long begunAt;
+    }
+
+    private static Map<SessionFactory, Holder> holders() {
+        return CURRENT.get();
     }
 
     private static Holder getOrCreateHolder(SessionFactory factory) {
-        Holder h = CURRENT.get();
+        Map<SessionFactory, Holder> map = holders();
+        Holder h = map.get(factory);
         if (h == null) {
             h = new Holder();
+            h.factory = factory;
             h.session = factory.openSession();
             h.owner = true;
-            CURRENT.set(h);
+            map.put(factory, h);
         }
         return h;
     }
 
     /**
-     * Gets the current thread's Session.
+     * Gets the current thread's Session for the given factory.
      *
-     * <p>If no Session exists, a new one is created and bound to the thread.</p>
+     * <p>If no Session exists for that factory, a new one is created and bound
+     * to the thread.</p>
      *
-     * <p><b>Contract:</b> the returned Session is managed by this library.
-     * In non-transactional usage, the caller <b>must</b> invoke
-     * {@link #close()} when done, otherwise the Session remains bound
-     * to the current thread until the thread is reused.</p>
+     * @param factory the SessionFactory the session must belong to
+     * @return the Session bound to the current thread for {@code factory}
      */
     public static Session current(SessionFactory factory) {
         return getOrCreateHolder(factory).session;
     }
 
     /**
-     * Starts a transaction.
+     * Starts a transaction for the given factory.
      *
-     * <p>If a transaction already exists, only the nesting depth is increased.
-     * The actual Hibernate transaction is created only at the outermost level.</p>
+     * <p>If a transaction for that factory already exists, only the nesting depth
+     * is increased. The actual Hibernate transaction is created only at the
+     * outermost level.</p>
+     *
+     * @param factory the SessionFactory to start the transaction for
      */
     public static void begin(SessionFactory factory) {
         Holder h = getOrCreateHolder(factory);
@@ -121,25 +142,36 @@ public final class SessionContext {
                 closeIfOwner(h);
                 throw new HibernateLiteException("Failed to begin transaction", e);
             }
+            h.begunAt = SEQUENCE.incrementAndGet();
         }
         h.depth++;
     }
 
+    /**
+     * Commits the transaction of the most recently begun factory.
+     *
+     * @see #commit(SessionFactory)
+     */
+    public static void commit() {
+        commitHolder(requireHolder(primary()));
+    }
 
     /**
-     * Commits the current transaction.
+     * Commits the transaction of the given factory.
      *
      * <p>Only the outermost transaction performs the real commit.
      * Inner transactions only decrease the nesting depth.</p>
      *
      * <p>If an inner operation marked the transaction as rollback-only,
      * the outermost commit will rollback instead.</p>
+     *
+     * @param factory the SessionFactory whose transaction should be committed
      */
-    public static void commit() {
-        Holder h = CURRENT.get();
-        if (h == null) {
-            throw new HibernateLiteException("No transaction context");
-        }
+    public static void commit(SessionFactory factory) {
+        commitHolder(requireHolder(holders().get(factory)));
+    }
+
+    private static void commitHolder(Holder h) {
         if (h.depth <= 0) {
             throw new HibernateLiteException("Invalid transaction depth");
         }
@@ -175,11 +207,23 @@ public final class SessionContext {
             throw new HibernateLiteException("Transaction marked rollback-only");
         }
 
+        /*
+         * A transaction that is no longer active was rolled back (or committed)
+         * outside of this library. Reporting success here would silently discard
+         * the caller's writes, so it must fail loudly instead.
+         */
+        if (!h.tx.isActive()) {
+            tryRollback(h);
+            h.tx = null;
+            closeIfOwner(h);
+            throw new HibernateLiteException(
+                    "Transaction is no longer active; it was rolled back or committed outside "
+                            + "of Hibernate-Lite, so nothing has been committed");
+        }
+
         // Normal transaction commit.
         try {
-            if (h.tx.isActive()) {
-                h.tx.commit();
-            }
+            h.tx.commit();
         } catch (RuntimeException e) {
             // Commit failure: attempt rollback to restore consistency.
             tryRollback(h);
@@ -192,7 +236,16 @@ public final class SessionContext {
     }
 
     /**
-     * Rolls back the current transaction.
+     * Rolls back the transaction of the most recently begun factory.
+     *
+     * @see #rollback(SessionFactory)
+     */
+    public static void rollback() {
+        rollbackHolder(primary());
+    }
+
+    /**
+     * Rolls back the transaction of the given factory.
      *
      * <p>Nested transaction behavior:</p>
      * <ul>
@@ -200,9 +253,14 @@ public final class SessionContext {
      *     <li>Nested transaction: mark rollback-only and let the outermost
      *     transaction perform the rollback.</li>
      * </ul>
+     *
+     * @param factory the SessionFactory whose transaction should be rolled back
      */
-    public static void rollback() {
-        Holder h = CURRENT.get();
+    public static void rollback(SessionFactory factory) {
+        rollbackHolder(holders().get(factory));
+    }
+
+    private static void rollbackHolder(Holder h) {
         if (h == null) return;
 
         if (h.depth <= 1) {
@@ -218,14 +276,24 @@ public final class SessionContext {
     }
 
     /**
-     * Marks the current transaction as rollback-only.
+     * Marks the transaction of the most recently begun factory as rollback-only.
      *
-     * <p>This is used when an inner operation fails but the exception
-     * is handled by user code. The outer transaction must still rollback.</p>
+     * @see #markRollbackOnly(SessionFactory)
      */
     public static void markRollbackOnly() {
-        Holder h = CURRENT.get();
-        markRollbackOnlyInternal(h);
+        markRollbackOnlyInternal(primary());
+    }
+
+    /**
+     * Marks the transaction of the given factory as rollback-only.
+     *
+     * <p>This is used when an inner operation fails but the exception is handled
+     * by user code. The outer transaction must still rollback.</p>
+     *
+     * @param factory the SessionFactory whose transaction should be marked
+     */
+    public static void markRollbackOnly(SessionFactory factory) {
+        markRollbackOnlyInternal(holders().get(factory));
     }
 
     /**
@@ -241,11 +309,26 @@ public final class SessionContext {
     }
 
     /**
-     * Checks whether the current thread is inside a transaction.
+     * Checks whether the given factory has an active transaction on this thread.
+     *
+     * @param factory the SessionFactory to test
+     * @return {@code true} if a transaction is active for {@code factory}
+     */
+    public static boolean inTransaction(SessionFactory factory) {
+        Holder h = holders().get(factory);
+        return h != null && h.depth > 0;
+    }
+
+    /**
+     * Checks whether any factory has an active transaction on this thread.
+     *
+     * @return {@code true} if at least one transaction is active
      */
     public static boolean inTransaction() {
-        Holder h = CURRENT.get();
-        return h != null && h.depth > 0;
+        for (Holder h : holders().values()) {
+            if (h.depth > 0) return true;
+        }
+        return false;
     }
 
     /**
@@ -254,11 +337,9 @@ public final class SessionContext {
      * <p>Used by operations that do not require explicit transactions.</p>
      */
     public static void close() {
-        Holder h = CURRENT.get();
-        if (h == null) return;
-        // Active transactions must keep the Session alive.
-        if (h.depth > 0) return;
-        closeIfOwner(h);
+        for (Holder h : new ArrayList<>(holders().values())) {
+            if (h.depth == 0) closeIfOwner(h);
+        }
     }
 
     /**
@@ -267,16 +348,41 @@ public final class SessionContext {
      * <p>Clears ThreadLocal state and releases resources after tests.</p>
      */
     static void reset() {
-        Holder h = CURRENT.get();
-        if (h == null) return;
-        try {
-            if (h.tx != null && h.tx.isActive()) {
-                h.tx.rollback();
+        for (Holder h : new ArrayList<>(holders().values())) {
+            try {
+                if (h.tx != null && h.tx.isActive()) {
+                    h.tx.rollback();
+                }
+            } catch (RuntimeException ignored) {
+                // Ignore cleanup failures during tests.
             }
-        } catch (RuntimeException ignored) {
-            // Ignore cleanup failures during tests.
+            closeIfOwner(h);
         }
-        closeIfOwner(h);
+    }
+
+    /**
+     * Selects the holder the factory-less convenience methods operate on: the most
+     * recently begun active transaction, or the only registered holder.
+     */
+    private static Holder primary() {
+        Map<SessionFactory, Holder> map = holders();
+        Holder newest = null;
+        for (Holder h : map.values()) {
+            if (h.depth <= 0) continue;
+            if (newest == null || h.begunAt > newest.begunAt) {
+                newest = h;
+            }
+        }
+        if (newest != null) return newest;
+        if (map.size() == 1) return map.values().iterator().next();
+        return null;
+    }
+
+    private static Holder requireHolder(Holder h) {
+        if (h == null) {
+            throw new HibernateLiteException("No transaction context");
+        }
+        return h;
     }
 
     /**
@@ -295,8 +401,8 @@ public final class SessionContext {
     /**
      * Closes the Session if it is owned by HibernateLite.
      *
-     * <p>Always removes ThreadLocal reference to prevent leaks
-     * when threads are reused by thread pools.</p>
+     * <p>Removes the ThreadLocal reference for that factory to prevent leaks when
+     * threads are reused by thread pools.</p>
      */
     private static void closeIfOwner(Holder h) {
         if (h.owner && h.session != null) {
@@ -308,8 +414,12 @@ public final class SessionContext {
                 // Closing failure cannot be recovered.
             }
         }
+        Map<SessionFactory, Holder> map = holders();
+        map.remove(h.factory);
         // Prevent stale context from remaining in reused threads.
-        CURRENT.remove();
+        if (map.isEmpty()) {
+            CURRENT.remove();
+        }
     }
 
 }

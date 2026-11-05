@@ -373,16 +373,29 @@ public final class QueryExecutor {
              * same logic as SELECT and COUNT.
              */
             Predicate where = combine(cb, root, conditions, specs, meta);
-            if (where != null) {
-                cd.where(where);
-            }
 
             /*
-             * Execute the bulk DELETE operation.
-             *
-             * executeUpdate() returns the number of affected rows.
+             * A QuerySpec is allowed to return null. If every restriction is empty,
+             * "where" is null and the statement below would degrade into an
+             * unrestricted DELETE. The list-based guard above cannot catch that,
+             * so the effective predicate is checked again here.
              */
-            return session.createMutationQuery(cd).executeUpdate();
+            if (where == null) {
+                throw new HibernateLiteException(
+                        "delete() requires at least one condition or where() clause; "
+                                + "refusing to delete all rows of " + clazz.getName());
+            }
+            cd.where(where);
+
+            /*
+             * Bulk DML bypasses the persistence context: flush pending changes
+             * first, then evict every managed entity so that later reads in the
+             * same transaction observe the deletion instead of stale state.
+             */
+            session.flush();
+            int deleted = session.createMutationQuery(cd).executeUpdate();
+            session.clear();
+            return deleted;
         }));
     }
 
@@ -713,11 +726,26 @@ public final class QueryExecutor {
             }
 
             Predicate where = combine(cb, root, conditions, specs, meta);
-            if (where != null) {
-                cu.where(where);
-            }
 
-            return session.createMutationQuery(cu).executeUpdate();
+            /*
+             * Same guard as delete(): a QuerySpec may contribute nothing, which
+             * would turn this into an unrestricted UPDATE of the whole table.
+             */
+            if (where == null) {
+                throw new HibernateLiteException(
+                        "update() requires at least one condition or where() clause; "
+                                + "refusing to update all rows of " + clazz.getName());
+            }
+            cu.where(where);
+
+            /*
+             * Flush pending state, run the bulk update, then drop the first-level
+             * cache so subsequent reads do not return stale entities.
+             */
+            session.flush();
+            int updated = session.createMutationQuery(cu).executeUpdate();
+            session.clear();
+            return updated;
         }));
     }
 

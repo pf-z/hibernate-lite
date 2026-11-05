@@ -80,14 +80,14 @@ public final class TransactionTemplate {
          * Only create a transaction when user code
          * does not already run inside one.
          */
-        boolean autoTx = !SessionContext.inTransaction();
+        boolean autoTx = !SessionContext.inTransaction(sf);
         if (autoTx) SessionContext.begin(sf);
 
         try {
             R result = action.apply(SessionContext.current(sf));
-            if (autoTx) SessionContext.commit();
+            if (autoTx) SessionContext.commit(sf);
             return result;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             /*
              * If this template owns the transaction, rollback immediately.
              * Otherwise mark the outer transaction as rollback-only.
@@ -98,9 +98,9 @@ public final class TransactionTemplate {
              * failures raised by the action itself.
              */
             if (autoTx) {
-                SessionContext.rollback();
+                SessionContext.rollback(sf);
             } else {
-                SessionContext.markRollbackOnly();
+                SessionContext.markRollbackOnly(sf);
             }
             throw e;
         }

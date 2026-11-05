@@ -171,7 +171,7 @@ public final class CrudExecutor {
                             "Entity ID is null: " + entity.getClass().getName());
                 }
 
-                Object managed = session.get(entity.getClass(), id);
+                Object managed = session.get(meta.getEntityClass(), id);
 
                 /*
                  * No corresponding record.

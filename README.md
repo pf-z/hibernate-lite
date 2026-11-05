@@ -11,7 +11,9 @@
 
 **A lightweight Hibernate-based ORM framework with a clean and extensible API.**
 
-Hibernate-Lite is a lightweight ORM layer built on top of Hibernate ORM, designed to simplify database development while keeping access to Hibernate's powerful capabilities.
+Hibernate-Lite is a thin ORM layer built on top of Hibernate ORM. It removes DAO /
+Repository boilerplate and makes transactions implicit, while keeping Hibernate's
+native API reachable through explicit escape hatches.
 
 ## Table of Contents
 
@@ -28,24 +30,27 @@ Hibernate-Lite is a lightweight ORM layer built on top of Hibernate ORM, designe
   - [5. Pagination](#5-pagination)
   - [6. Transactions](#6-transactions)
   - [7. Escape Hatches](#7-escape-hatches)
+- [Semantics Reference](#semantics-reference)
+  - [Session lifecycle and detachment](#session-lifecycle-and-detachment)
+  - [Transaction semantics](#transaction-semantics)
+  - [Bulk DML and the persistence context](#bulk-dml-and-the-persistence-context)
+  - [Concurrency and multiple DataStores](#concurrency-and-multiple-datastores)
+  - [Safety guards](#safety-guards)
+- [Limitations](#limitations)
 - [Error Handling](#error-handling)
 - [Design Principles](#design-principles)
-- [Full API Index](#full-api-index)
+- [Building and Testing](#building-and-testing)
 - [License](#license)
 
 ## Overview
 
-Hibernate-Lite removes the boilerplate of DAO / Repository layers while preserving Hibernate's full power underneath.
+Hibernate-Lite gives you:
 
-If you have ever wished for:
-
-- **Zero Repository interfaces** — no `UserRepository`, no `UserDao`, no `UserDaoImpl`
-- **Automatic transactions** — `db.save(user)` just works
-- **Transparent session management** — no `Session`, no `EntityManager` in your business code
+- **Zero Repository interfaces** — one `DataStore` for every entity
+- **Automatic transactions** — `db.save(user)` wraps itself in a transaction
+- **Transparent session management** — no `Session`, no `EntityManager` in business code
 - **Type-safe queries** — `User::getName` instead of `"name"`
-- **Escape hatch** — full access to native Hibernate when needed
-
-then Hibernate-Lite is for you.
+- **Escape hatches** — raw JPA Criteria, JPQL, and the native `SessionFactory`
 
 ### Why Hibernate-Lite
 
@@ -88,11 +93,11 @@ db.transaction(() -> {
 - **Type-safe query DSL** — `User::getName` checked at compile time
 - **JPQL support** — for multi-table joins, subqueries, and complex queries
 - **Pagination** — with or without total count, with DTO mapping
-- **Conditional update and delete** — single SQL statement, with safety guards
-- **Nested transaction support** — REQUIRED semantics
-- **Thread-safe by design** — `Session` is bound to `ThreadLocal`, cleaned up automatically
+- **Conditional update and delete** — one SQL statement, with safety guards
+- **Nested transaction support** — REQUIRED semantics with rollback-only propagation
+- **Thread-safe per `DataStore`** — session state is bound to *(thread, SessionFactory)*
 - **Native Hibernate exceptions wrapped** into `HibernateLiteException`
-- **Escape hatches** — `where(QuerySpec)` and `unwrap(SessionFactory.class)`
+- **Escape hatches** — `where(QuerySpec)`, JPQL, `unwrap(SessionFactory.class)`
 
 ## Requirements
 
@@ -110,6 +115,10 @@ Supported databases (via Hibernate 6.6 dialects):
 - Oracle 19+
 - SQL Server 2012+
 - H2 2.1+
+
+Hibernate-Lite does **not** manage connections. Supply a `javax.sql.DataSource`
+(HikariCP, DBCP, a container pool, ...). It also does not configure a
+second-level cache, a dialect, or JDBC batching — see [Limitations](#limitations).
 
 ## Installation
 
@@ -186,26 +195,23 @@ Long id = db.transaction(() -> {
 
 #### `HibernateLite.builder()`
 
-Returns a `Builder` for configuring the library.
-
 | Method | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `dataSource(DataSource)` | ✅ | — | Connection pool (Hikari, DBCP, etc.) |
+| `dataSource(DataSource)` | ✅ | — | Connection pool (Hikari, DBCP, ...) |
 | `entities(Class<?>...)` | ✅ | — | At least one entity class |
 | `showSql(boolean)` | ❌ | `false` | Print generated SQL |
 | `ddlAuto(String)` | ❌ | `"validate"` | Schema strategy |
 
-**`ddlAuto` values**:
+**`ddlAuto` values**: `"none"`, `"validate"` (default), `"update"`, `"create"`,
+`"create-drop"`.
 
-- `"none"` — do nothing
-- `"validate"` — **default**, check schema only (production-safe)
-- `"update"` — auto-create/update tables (development)
-- `"create"` — recreate on startup
-- `"create-drop"` — create on startup, drop on shutdown
+`build()` throws `IllegalStateException` when the data source or the entity list is
+missing, and wraps any Hibernate bootstrap failure after destroying the service
+registry.
 
 #### `DataStore.close()`
 
-Releases the `SessionFactory` and related resources. `DataStore` implements `AutoCloseable`, so it can be used in try-with-resources.
+Releases the `SessionFactory`. `DataStore` implements `AutoCloseable`:
 
 ```java
 try (DataStore db = HibernateLite.builder()...build()) {
@@ -213,98 +219,100 @@ try (DataStore db = HibernateLite.builder()...build()) {
 }
 ```
 
-**Notes**:
+**Notes**
 
-- Idempotent — safe to call multiple times
-- After calling `close()`, the `DataStore` must not be used again
+- Idempotent — safe to call multiple times.
+- After `close()`, the `DataStore` must not be used again; `unwrap(...)` still
+  returns the (now closed) `SessionFactory`.
+- `close()` does **not** roll back a transaction that is currently open on some
+  thread. Commit or roll back first.
+- The `DataSource` is **not** closed by `close()`; it belongs to the caller.
 
 ### 2. CRUD
 
 #### `find(Class<T> type, Object id)`
 
-Find an entity by primary key.
-
 ```java
 User u = db.find(User.class, 1L);
 ```
 
-- Returns `null` if no entity exists
-- Hits Hibernate first/second-level cache
-- Throws `IllegalArgumentException` if `type` or `id` is `null`
+- Returns `null` if no entity exists.
+- Reads from the **first-level cache of the transaction-scoped Session only**. No
+  second-level cache is configured.
+- The returned entity is **detached** as soon as the call returns — see
+  [Session lifecycle and detachment](#session-lifecycle-and-detachment).
+- Throws `IllegalArgumentException` if `type` or `id` is `null`.
 
 #### `save(T entity)`
 
-Smart save — behavior depends on the entity's ID state:
-
-| ID state | Entity type | Behavior |
-|----------|-------------|----------|
+| ID state | Entity type | Behaviour |
+|----------|-------------|-----------|
 | `null` | Any | **INSERT** (`persist`) |
-| non-null | Has `@GeneratedValue` | **UPDATE** (`merge`) |
-| non-null | Business key (no `@GeneratedValue`) | ❌ **Throws exception** |
+| non-null | Has `@GeneratedValue` | **MERGE** (`merge`) — may UPDATE an existing row |
+| non-null | Business key (no `@GeneratedValue`) | ❌ throws `HibernateLiteException` |
 
 ```java
-// Insert
 User u = new User("Alice");
-u = db.save(u);
+u = db.save(u);          // INSERT
 
-// Update
 u.setName("Alice Smith");
-u = db.save(u);
+u = db.save(u);          // UPDATE (merge)
 ```
 
-**Notes**:
+**Notes**
 
-1. **Always use the return value** — `merge` returns a new managed instance
-2. **Business keys not supported** — `save` throws for entities without `@GeneratedValue`
-3. **Do not manually set ID then save** — may accidentally UPDATE instead of INSERT
+1. **Always use the return value** — `merge` returns a different, managed instance.
+2. **Do not assign an id yourself** on a `@GeneratedValue` entity unless you really
+   mean "update the row with that id".
+3. **Business-key entities cannot be created with `save()`.** The key *is* the
+   identifier, so it is non-null on any valid instance and the call always throws.
+   Insert them with `unwrap(SessionFactory.class)` (see [Limitations](#limitations)).
+4. **Primitive identifiers** (`long id`) are never `null` (`0`), so they always take
+   the `merge` path. This works, but costs an extra `SELECT`; prefer boxed types.
+5. Hibernate proxies are accepted: the identifier is read from the proxy without
+   initialising it.
 
 #### `saveAll(List<T> entities)`
 
-Batch save all entities in one transaction.
-
 ```java
-List<User> users = List.of(
-        new User("Alice"),
-        new User("Bob"),
-        new User("Charlie")
-);
 List<User> saved = db.saveAll(users);
 ```
 
-- All entities saved in one transaction
-- Flushes and clears the persistence context every **50 rows**
-- Any failure → all roll back
-- **Returned entities may be detached** due to flush/clear
+- All entities are written in **one transaction**.
+- Every **50** rows the persistence context is flushed and cleared, so memory stays
+  bounded for large batches.
+- This is **not** JDBC batching: `hibernate.jdbc.batch_size` is never set, and
+  `IDENTITY` generators cannot be batched at all.
+- **Any failure rolls back the whole batch.**
+- Entities after a flush/clear boundary are **detached**.
+- An empty input list is returned as-is (no transaction is opened).
+- A `null` element throws `HibernateLiteException` naming the offending index.
 
 #### `delete(Object entity)`
 
-Delete an entity.
-
 ```java
-User u = db.find(User.class, 1L);
-db.delete(u);
+db.delete(db.find(User.class, 1L));
 
-// Detached entity also works
 User detached = new User();
 detached.setId(1L);
 db.delete(detached);
 ```
 
-- Idempotent — silently returns if no matching record exists
+- Idempotent — silently returns when no matching row exists.
+- Works with managed entities, detached entities, and lazy proxies.
+- Throws `HibernateLiteException` if the entity has no identifier.
 
 ### 3. Query DSL
-
-#### Create a query
 
 ```java
 <T> LambdaQuery<T> query(Class<T> type)
 ```
 
-Returns a chainable query object. **`LambdaQuery` is not thread-safe** — create a new one per query.
+`LambdaQuery` is **mutable and not thread-safe**: create one per query.
 
 #### Operators
 
-All condition methods return `this` for chaining. Multiple conditions are **AND-combined** by default.
+All conditions are **AND**-combined.
 
 | Method | SQL | Example |
 |--------|-----|---------|
@@ -321,124 +329,67 @@ All condition methods return `this` for chaining. Multiple conditions are **AND-
 | `isNotNull(field)` | `IS NOT NULL` | `.isNotNull(User::getEmail)` |
 | `between(field, low, high)` | `BETWEEN` | `.between(User::getAge, 18, 65)` |
 
-**Field references use getter method references**: `User::getName`, `User::isActive`.
+Field references are **getter method references** (`User::getName`,
+`User::isActive`). The property name is derived with `Introspector.decapitalize`,
+so `getURL` maps to `URL`.
 
-#### Multiple conditions (AND)
+**Validation performed eagerly, when the condition is built:**
 
-```java
-List<User> users = db.query(User.class)
-        .eq(User::getStatus, "ACTIVE")
-        .gt(User::getAge, 18)
-        .like(User::getName, "A%")
-        .list();
-// WHERE status = ? AND age > ? AND name LIKE ?
-```
+- `eq`/`ne`/`gt`/`ge`/`lt`/`le` reject a `null` value (use `isNull`/`isNotNull`).
+- `like` requires a `String`.
+- `in`/`notIn` require an `Iterable`; an **empty** collection is rejected when the
+  query executes.
+- `between` requires two bounds; an inverted range simply returns no rows.
+- A non-getter method reference throws `HibernateLiteException`.
 
 #### Ordering
 
 ```java
-// Ascending
-db.query(User.class).orderByAsc(User::getName).list();
-
-// Descending
-db.query(User.class).orderByDesc(User::getCreatedAt).list();
-
-// Multiple fields (applied in order)
 db.query(User.class)
         .orderByAsc(User::getStatus)
         .orderByDesc(User::getAge)
         .list();
 ```
 
-#### Aggregates and single result
+Ordering rules are applied in declaration order. **If you do not order at all, no
+`ORDER BY` is emitted** and page boundaries are not deterministic on a real
+database.
+
+#### Terminal operations
 
 | Method | Description |
 |--------|-------------|
-| `list()` | All matching entities, default limit 1000 |
-| `list(int limit)` | Limited list |
-| `one()` | Exactly one (0 → null; >1 → throws) |
-| `count()` | Count matching entities |
-| `exists()` | Whether any entity matches |
+| `list()` | All matching entities, **silently capped at 1000** |
+| `list(int limit)` | Explicitly limited |
+| `one()` | Exactly one (0 → `null`; >1 → `HibernateLiteException`) |
+| `count()` | `SELECT COUNT(...)` |
+| `exists()` | Implemented as `count() > 0` |
+| `delete()` | Bulk delete, requires a restriction |
+| `update(field, value)` / `update(Map)` | Bulk update, requires a restriction |
+| `page(PageRequest)` | Paginated result |
+
+> **Sharp edge.** `list()` returns at most 1000 rows **without any warning**, while
+> `count()` reports the real total. Use `list(n)` or `page()` when the data set may
+> be larger.
+
+#### Conditional delete / update
 
 ```java
-List<User> users = db.query(User.class).eq(User::getStatus, "ACTIVE").list();
-
-List<User> top10 = db.query(User.class).orderByDesc(User::getAge).list(10);
-
-User u = db.query(User.class).eq(User::getEmail, "alice@x.com").one();
-
-long count = db.query(User.class).eq(User::getStatus, "ACTIVE").count();
-
-boolean exists = db.query(User.class).eq(User::getName, "Alice").exists();
+int deleted = db.query(User.class).lt(User::getAge, 18).delete();
+int updated = db.query(User.class).eq(User::getName, "Alice").update(User::getAge, 26);
 ```
 
-#### Conditional delete
-
-```java
-int deleted = db.query(User.class)
-        .lt(User::getAge, 18)
-        .delete();
-```
-
-**Safety guard**: **unconditional delete throws an exception**:
-
-```java
-db.query(User.class).delete();
-// ❌ HibernateLiteException:
-//    delete() requires at least one condition or where() clause;
-//    refusing to delete all rows of ...
-```
-
-**Escape hatch + conditional delete**:
-
-```java
-int deleted = db.query(User.class)
-        .gt(User::getAge, 0)
-        .where((cb, root) -> cb.equal(root.get("status"), "INACTIVE"))
-        .delete();
-```
-
-#### Conditional update
-
-**Single field**:
-
-```java
-int updated = db.query(Order.class)
-        .lt(Order::getCreatedAt, cutoff)
-        .update(Order::getStatus, "CANCELLED");
-```
-
-**Multiple fields**:
-
-```java
-int updated = db.query(User.class)
-        .eq(User::getName, "Alice")
-        .update(Map.of(
-                "age", 26,
-                "status", "VIP"
-        ));
-```
-
-**Escape hatch + conditional update**:
-
-```java
-int updated = db.query(User.class)
-        .where((cb, root) -> cb.lt(root.get("age"), 18))
-        .update(User::getStatus, "MINOR");
-```
-
-**Safety guard**: **unconditional update throws an exception**.
+Both are single bulk SQL statements and both require a restriction — see
+[Safety guards](#safety-guards).
 
 ### 4. JPQL
-
-#### Create a JPQL query
 
 ```java
 <T> JpqlQuery<T> query(String jpql, Class<T> resultType)
 ```
 
-- `jpql` — standard JPQL string
-- `resultType` — entity class or scalar (`Long.class`)
+- `jpql` — a JPQL string (not SQL)
+- `resultType` — entity class, or a scalar type such as `Long.class`
 
 #### Parameters
 
@@ -446,9 +397,9 @@ int updated = db.query(User.class)
 JpqlQuery<T> param(String name, Object value)
 ```
 
-- Name does not include the leading `:`
-- Chainable
-- Value can be `null`
+The name has **no leading `:`**. Chainable; a repeated name overwrites the previous
+value; `null` values are allowed. **Every parameter you bind must be declared by the
+statement** — a stray name is rejected by Hibernate.
 
 ```java
 List<User> users = db.query(
@@ -465,32 +416,17 @@ List<User> users = db.query(
 |--------|-------------|
 | `list()` | Default limit 1000 |
 | `list(int limit)` | Limited list |
-| `one()` | Single result (0 → null; >1 → throws) |
-| `count()` | Count (JPQL must be `SELECT COUNT(...)`) |
-| `exists()` | Existence check |
-| `page(PageRequest)` | **Throws `UnsupportedOperationException`** |
-| `page(String countJpql, PageRequest)` | Pagination (must provide count JPQL) |
+| `one()` | Single result (0 → `null`; >1 → throws) |
+| `count()` | Scalar count; the JPQL **must** be `SELECT COUNT(...)` |
+| `exists()` | `list(1)` is non-empty |
+| `page(PageRequest)` | **Always throws `UnsupportedOperationException`** |
+| `page(String countJpql, PageRequest)` | Pagination with an explicit count statement |
 
-#### Examples
+#### Pagination
 
 ```java
-// Multi-table JOIN
-List<Order> orders = db.query(
-        "SELECT o FROM Order o JOIN o.user u WHERE u.status = :status",
-        Order.class)
-        .param("status", "ACTIVE")
-        .list();
-
-// Count
-long count = db.query(
-        "SELECT COUNT(u) FROM User u WHERE u.status = :status",
-        Long.class)
-        .param("status", "ACTIVE")
-        .count();
-
-// Pagination (must provide count JPQL)
 Page<Order> page = db.query(
-        "SELECT o FROM Order o WHERE o.status = :status",
+        "SELECT o FROM Order o WHERE o.status = :status ORDER BY o.createdAt DESC",
         Order.class)
         .param("status", "PENDING")
         .page(
@@ -498,104 +434,72 @@ Page<Order> page = db.query(
                 PageRequest.of(0, 20));
 ```
 
+**Slice mode** does not need a count statement — pass `null`:
+
+```java
+Page<Order> page = db.query("SELECT o FROM Order o", Order.class)
+        .page(null, PageRequest.of(0, 20).withoutCount());
+```
+
+The count statement may declare a **different subset** of the parameters than the
+page statement; only the names it declares are bound. Parameters that the count
+statement declares but you did not supply remain unbound and fail loudly.
+
 #### Capabilities
 
-**Supported**:
+**Supported**: multi-table `JOIN`, subqueries, `GROUP BY` / `HAVING`, `ORDER BY`,
+aggregates, DTO projections (`Object[].class`).
 
-- Multi-table `JOIN`
-- Subqueries
-- `GROUP BY` / `HAVING`
-- `ORDER BY`
-- Aggregates
-
-**Not supported**:
-
-- Native SQL — use `unwrap(SessionFactory.class)`
-- Stored procedures
-- Database-specific syntax
-
-#### Exceptions
-
-- `jpql` is `null` or blank → `IllegalArgumentException`
-- `resultType` is `null` → `IllegalArgumentException`
-- JPQL syntax error → **Hibernate 6 throws `IllegalArgumentException`**
-- Runtime errors → `HibernateLiteException`
+**Not supported**: native SQL, stored procedures, database-specific syntax — use
+`unwrap(SessionFactory.class)`.
 
 ### 5. Pagination
 
 #### `PageRequest`
 
-**`PageRequest.of(int page, int size)`**:
-
-- `page` — **0-based** (first page is 0)
-- `size` — page size, **max 1000**
-- **Total count is enabled by default**
-
-**`PageRequest.firstPage(int size)`**: equivalent to `PageRequest.of(0, size)`.
-
-**`PageRequest.withoutCount()`**:
-
-- Returns a **new instance** (immutable)
-- **Disables total count**, but `hasNext` is still **accurate** (fetches one extra row)
-
 ```java
-PageRequest r1 = PageRequest.of(0, 20);                  // First page, with total
-PageRequest r2 = PageRequest.of(1, 20);                  // Second page
-PageRequest r3 = PageRequest.of(0, 20).withoutCount();   // Without total
+PageRequest.of(page, size)        // total count enabled
+PageRequest.firstPage(size)       // same as of(0, size)
+PageRequest.of(page, size).withoutCount()
 ```
 
-#### DSL pagination
+- `page` is **0-based**
+- `size` must be in **[1, 1000]**
+- `page * size` must fit in an `int`, otherwise construction throws
+  `IllegalArgumentException`
+- Instances are immutable
 
-```java
-Page<User> page = db.query(User.class)
-        .eq(User::getStatus, "ACTIVE")
-        .orderByDesc(User::getCreatedAt)
-        .page(PageRequest.of(0, 20));
-```
-
-#### JPQL pagination
-
-**Must provide count JPQL**:
-
-```java
-Page<User> page = db.query(
-        "SELECT u FROM User u WHERE u.status = :status ORDER BY u.createdAt DESC",
-        User.class)
-        .param("status", "ACTIVE")
-        .page(
-                "SELECT COUNT(u) FROM User u WHERE u.status = :status",
-                PageRequest.of(0, 20));
-```
-
-#### `Page<T>` API
+#### `Page<T>`
 
 | Method | Description |
 |--------|-------------|
-| `content()` | Page content (**unmodifiable**) |
-| `numberOfElements()` | Actual element count |
+| `content()` | Unmodifiable, defensively copied list |
+| `numberOfElements()` | Elements on this page |
 | `isEmpty()` | Whether the page is empty |
-| `page()` | 0-based page number |
-| `size()` | Requested page size |
-| `totalElements()` | **Total elements** (throws `IllegalStateException` in slice mode) |
-| `totalPages()` | **Total pages** (throws in slice mode) |
-| `hasTotal()` | Whether total count is available |
-| `hasNext()` | Whether another page exists |
-| `hasPrevious()` | Whether a previous page exists |
-| `isFirst()` | Whether this is the first page |
-| `isLast()` | Whether this is the last page |
-| `map(Function)` | DTO mapping, **preserves metadata** |
+| `page()` / `size()` | Requested page index and size |
+| `totalElements()` | Total matches (**throws `IllegalStateException` in slice mode**) |
+| `totalPages()` | Total pages (**throws in slice mode**) |
+| `hasTotal()` | `true` for total-count mode |
+| `hasNext()` | Accurate in both modes |
+| `hasPrevious()` / `isFirst()` / `isLast()` | Page position helpers |
+| `map(Function)` | DTO mapping that preserves all pagination metadata |
 
-#### Total-count mode vs Slice mode
+`Page` has no `equals`/`hashCode`, and `map` cannot produce `null` elements
+(`List.copyOf` semantics).
 
-| Aspect | With count | Without count |
-|--------|-----------|---------------|
+#### Total-count mode vs slice mode
+
+| Aspect | `PageRequest.of(...)` | `.withoutCount()` |
+|--------|----------------------|-------------------|
 | `totalElements()` | ✅ | ❌ throws |
 | `totalPages()` | ✅ | ❌ throws |
 | `hasTotal()` | `true` | `false` |
-| `hasNext()` | accurate | **accurate** |
-| `isLast()` | accurate | **accurate** |
-| SQL queries | 2 (data + count) | 1 (data, fetches one extra row) |
-| Use case | "total X, page Y" | Infinite scroll, load more |
+| `hasNext()` | accurate | accurate (fetches `size + 1` rows) |
+| SQL statements | 2 | 1 |
+| Use case | "page 2 of 7" | infinite scroll |
+
+> **Consistency note.** In total-count mode the page query and the count query run
+> in **two separate transactions**, so they can disagree under concurrent writes.
 
 #### DTO mapping
 
@@ -603,137 +507,198 @@ Page<User> page = db.query(
 Page<UserDto> dtos = page.map(UserDto::from);
 ```
 
-Preserves: `page`, `size`, `totalElements`, `hasNext`, `hasTotal`.
+Preserves `page`, `size`, `totalElements`, `hasNext`, `hasTotal`.
 
 ### 6. Transactions
 
-#### Programmatic (with return value)
+#### Programmatic
 
 ```java
 <T> T transaction(TransactionCallback<T> callback)
-```
-
-- Normal return → commit
-- Throws `RuntimeException` → rollback + rethrow
-
-```java
-Long id = db.transaction(() -> {
-    User u = db.save(new User("Alice"));
-    db.save(new Order(u));
-    return u.getId();
-});
-```
-
-#### Programmatic (without return value)
-
-```java
 void transaction(Runnable work)
 ```
 
+- Normal return → commit
+- **Any `Throwable`** (`RuntimeException` *and* `Error`) → rollback, then rethrown
+  unchanged
+- `TransactionCallback` cannot declare checked exceptions; wrap them if needed
+
+#### Nested transactions (REQUIRED)
+
+An inner `transaction(...)` joins the outer transaction. Only the outermost scope
+commits.
+
 ```java
-db.transaction(() -> {
-    db.save(order);
-    db.save(payment);
-});
-```
-
-#### Nested transactions
-
-**REQUIRED propagation** — inner calls reuse the outer transaction.
-
-```java
-db.transaction(() -> {              // Outer
+db.transaction(() -> {          // outer
     db.save(a);
-    db.transaction(() -> {          // Inner — reuses outer transaction
+    db.transaction(() -> {      // joins
         db.save(b);
     });
     db.save(c);
-});                                  // Commits all
+});                             // commits a, b, c
 ```
 
-**Inner exception swallowed — outer still rolls back**:
+If an inner scope fails and the caller swallows the exception, the transaction is
+marked **rollback-only**. The outermost commit rolls back and throws
+`HibernateLiteException("Transaction marked rollback-only")`:
 
 ```java
 db.transaction(() -> {
     db.save(a);
     try {
-        db.transaction(() -> {
-            throw new RuntimeException("inner");
-        });
-    } catch (RuntimeException ignored) {
-        // Swallowed by user
-    }
-    db.save(b);                     // ← Still rolled back
+        db.transaction(() -> { throw new RuntimeException("inner"); });
+    } catch (RuntimeException ignored) { }
+    db.save(b);                 // still rolled back
 });
-// Throws HibernateLiteException: Transaction marked rollback-only
 ```
 
 #### Automatic transactions
 
-The following methods automatically wrap themselves in a transaction when no outer transaction exists:
+These wrap themselves in a transaction when no outer one exists:
 
 - `save` / `saveAll` / `delete`
 - `find`
-- All terminal operations on `LambdaQuery` and `JpqlQuery`
+- every terminal operation on `LambdaQuery` and `JpqlQuery`
 
-You never need to manage transactions manually for a single operation.
+Reads also start a **read-write** transaction (no read-only optimisation is
+applied).
+
+#### Commit is verified
+
+If the underlying transaction is no longer active at commit time — it was rolled
+back by the database (timeout, deadlock), or by the caller through the escape
+hatch — `commit()` throws instead of silently reporting success. `markRollbackOnly`
+and double-commit are reported the same way.
 
 ### 7. Escape Hatches
 
 #### `where(QuerySpec<T>)` — raw Criteria
 
 ```java
-LambdaQuery<T> where(QuerySpec<T> spec)
-```
-
-- Combined with DSL conditions via **AND**
-- Can be called multiple times
-- Returning `null` means no additional restriction
-
-```java
-// OR nesting
 List<User> users = db.query(User.class)
         .where((cb, root) -> cb.or(
                 cb.like(root.get("name"), "A%"),
-                cb.like(root.get("name"), "B%")
-        ))
+                cb.like(root.get("name"), "B%")))
         .list();
-
-// DSL + Criteria mixed
-List<User> users = db.query(User.class)
-        .eq(User::getStatus, "ACTIVE")
-        .where((cb, root) -> cb.gt(root.get("age"), 25))
-        .list();
-// WHERE status = ? AND age > ?
 ```
 
-**Note**: `root.get("field")` takes plain strings, **not** compile-time checked.
+- AND-combined with the DSL conditions; may be called multiple times
+- Returning `null` contributes no restriction
+- `root.get("field")` takes a plain string and is **not** compile-time checked
+- Exceptions thrown inside a spec propagate to the caller
 
-#### `unwrap(Class<T> type)` — native Hibernate
+#### `unwrap(Class<T> type)`
 
-```java
-<T> T unwrap(Class<T> type)
-```
-
-**Currently supported**: `SessionFactory.class`.
+Currently supports **`SessionFactory.class` only**.
 
 ```java
 SessionFactory sf = db.unwrap(SessionFactory.class);
-
 try (Session session = sf.openSession()) {
     session.beginTransaction();
-    List<?> results = session.createNativeQuery("SELECT * FROM users", Object[].class)
-            .list();
+    session.createNativeQuery("SELECT * FROM users", Object[].class).list();
     session.getTransaction().commit();
 }
 ```
 
-**Notes**:
-
-- Unsupported types → `HibernateLiteException`
 - `null` → `IllegalArgumentException`
-- **Bypasses the library's transaction and session management**
-- Inside a `db.transaction(...)`, prefer `SessionContext.current(sf)` over `openSession()`
+- Unsupported type → `HibernateLiteException`
+- Bypasses the library's session and transaction management
+- After `close()` it returns the closed factory
+
+## Semantics Reference
+
+### Session lifecycle and detachment
+
+Every `DataStore` operation runs in a `Session` that is opened lazily and **closed
+when the operation (or the enclosing `db.transaction`) finishes**. Consequences:
+
+```java
+Book book = db.find(Book.class, id);
+book.getAuthor().getName();     // LazyInitializationException
+```
+
+Lazy associations are only usable **inside** `db.transaction(...)`:
+
+```java
+String author = db.transaction(() -> {
+    Book b = db.find(Book.class, id);
+    return b.getAuthor().getName();
+});
+```
+
+Entities returned by `find`, `list`, `one`, `page`, `save`, `saveAll` are
+**detached** (or become detached at the next batch boundary). If you need to keep
+working with an entity graph, do the work inside a transaction, or reload it.
+
+### Transaction semantics
+
+- **Scope**: transaction state is kept per *(thread, `SessionFactory`)*. Two
+  `DataStore` instances never share a `Session`.
+- **Two `DataStore`s in one call chain**: a call to `db2` inside
+  `db1.transaction(...)` runs in **its own transaction** and is **not** atomic with
+  `db1`. There is no distributed transaction support.
+- **Thread isolation**: a transaction is never visible to another thread.
+- **Cleanup**: after commit or rollback the `Session` is closed and the thread-local
+  state is removed, including when the callback throws `Error`.
+- **Reads** participate in the current transaction, if any.
+
+### Bulk DML and the persistence context
+
+`LambdaQuery.delete()` and `LambdaQuery.update(...)` execute one bulk statement.
+They `flush()` pending changes first and `clear()` the persistence context
+afterwards, so later reads inside the same transaction observe the new state.
+
+The trade-off: **every entity becomes detached** at that point. Re-`find`/`save`
+them afterwards if you need to keep mutating them.
+
+### Concurrency and multiple DataStores
+
+| Component | Thread-safe? |
+|-----------|--------------|
+| `DataStore` | ✅ |
+| `SessionFactoryHolder`, `CrudExecutor`, `QueryExecutor`, `JpqlExecutor`, `MetadataRegistry` | ✅ |
+| `LambdaQuery` | ❌ create one per query |
+| `JpqlQuery` | ❌ create one per query |
+| `Page`, `PageRequest` | ✅ immutable |
+
+Multiple threads may share one `DataStore`; each gets its own `Session` and its own
+transaction.
+
+### Safety guards
+
+`delete()` and `update()` refuse to run when the query would have **no effective
+restriction**. This covers the obvious case *and* the subtle one where every
+`QuerySpec` returns `null`:
+
+```java
+db.query(User.class).delete();                       // ❌ throws
+db.query(User.class).where((cb, root) -> null).delete();   // ❌ throws
+db.query(User.class).where((cb, root) -> cb.conjunction()).delete();  // ✅ explicit "all"
+```
+
+The check is per statement — it does not protect `save`, JPQL, or the escape
+hatches.
+
+## Limitations
+
+| Area | Limitation |
+|------|------------|
+| Identifier mapping | Only a **single `@Id` field**. No `@EmbeddedId`, no `@IdClass`, no `@Id` on a getter (property access) |
+| Business keys | `save()` cannot insert them; use `unwrap(SessionFactory.class)` |
+| Primitive ids | A primitive `long id` is never `null`, so it always takes the `merge` path |
+| Lazy loading | Associations are only readable inside `db.transaction(...)` |
+| `list()` | Silently capped at 1000 rows |
+| Pagination | No default `ORDER BY`; unstable pages without explicit ordering |
+| Total count | Page and count run in two transactions |
+| JPQL | `page(PageRequest)` always throws; no native SQL, no DML |
+| Bulk DML | Detaches everything in the persistence context |
+| Batching | No JDBC batching (`hibernate.jdbc.batch_size` is not set); `IDENTITY` cannot batch |
+| Configuration | Only `dataSource`, `entities`, `showSql`, `ddlAuto`; no way to pass extra Hibernate settings (dialect, fetch size, second-level cache, ...) |
+| Caching | No second-level cache |
+| Transactions | No `REQUIRES_NEW`, no savepoints, no read-only transactions, no isolation-level control |
+| `@Transient` | Excluded from persistent-attribute metadata, so referencing one in a query/update fails with `Entity ... has no field` rather than "not a persistent attribute" |
+| `Page` | No `equals`/`hashCode`; `map` cannot return `null` |
+| Callbacks | `TransactionCallback` cannot throw checked exceptions |
 
 ## Error Handling
 
@@ -741,156 +706,64 @@ try (Session session = sf.openSession()) {
 
 | Exception | Trigger |
 |-----------|---------|
-| `HibernateLiteException` | Runtime errors within the library (wraps Hibernate exceptions) |
-| `IllegalArgumentException` | Parameter validation failures (null / empty / invalid) |
-| `NullPointerException` | `Objects.requireNonNull` scenarios |
-| `UnsupportedOperationException` | `JpqlQuery.page(PageRequest)` single-arg version |
+| `HibernateLiteException` | Runtime failures; wraps `HibernateException` |
+| `IllegalArgumentException` | Parameter validation in `CrudExecutor`, `QueryExecutor`, `PageRequest` |
+| `NullPointerException` | `Objects.requireNonNull` in `DataStoreImpl` / `TransactionManager` |
+| `UnsupportedOperationException` | `JpqlQuery.page(PageRequest)` |
+| `IllegalStateException` | `totalElements()` / `totalPages()` in slice mode |
+
+> **Inconsistency.** Null-argument validation is not uniform: `save(null)` throws
+> `IllegalArgumentException`, `db.query((Class<?>) null)` and `transaction(null)`
+> throw `NullPointerException`.
 
 ### Common errors
 
-| Scenario | Exception | Message example |
-|----------|-----------|-----------------|
+| Scenario | Exception | Message |
+|----------|-----------|---------|
 | Unconditional `delete()` | `HibernateLiteException` | `refusing to delete all rows of ...` |
 | Unconditional `update()` | `HibernateLiteException` | `refusing to update all rows of ...` |
 | `save` with business key | `HibernateLiteException` | `Cannot determine save semantics ...` |
-| Field does not exist | `HibernateLiteException` | `Entity ... has no field: nmae` |
-| JPQL syntax error | `IllegalArgumentException` | Hibernate parser exception |
-| `find(null, ...)` | `IllegalArgumentException` | `entity type cannot be null` |
-| Negative page | `IllegalArgumentException` | `page must be >= 0` |
-| Size over limit | `IllegalArgumentException` | `size must be in [1, 1000]` |
-| `totalElements()` in slice mode | `IllegalStateException` | `Total element count is not available` |
+| Unknown field | `HibernateLiteException` | `Entity ... has no field: nmae` |
+| Empty `IN` list | `HibernateLiteException` | `IN / NOT IN requires a non-empty collection` |
+| JPQL syntax error | `IllegalArgumentException` | Hibernate parser message |
+| Commit on a dead transaction | `HibernateLiteException` | `Transaction is no longer active ...` |
+| Swallowed inner failure | `HibernateLiteException` | `Transaction marked rollback-only` |
+| `page * size` overflow | `IllegalArgumentException` | `page * size exceeds Integer.MAX_VALUE` |
+| Negative page / bad size | `IllegalArgumentException` | `page must be >= 0` / `size must be in [1, 1000]` |
 | `unwrap(String.class)` | `HibernateLiteException` | `Unsupported unwrap type` |
 
-### Exception wrapping rules
+### Wrapping rules
 
-- **Hibernate native exceptions** → wrapped as `HibernateLiteException` (with `cause`)
-- **Library exceptions** → rethrown as-is
-- **Parameter validation exceptions** → thrown directly as `IllegalArgumentException`
+- Hibernate exceptions → `HibernateLiteException` (with `cause`)
+- Library exceptions → rethrown unchanged (never double-wrapped)
+- Parameter validation → thrown directly
 
 ## Design Principles
 
 1. **Zero boilerplate** — no repository per entity
-2. **Automatic transactions** — a single `save` wraps itself; batch operations share one transaction
-3. **Thread-safe by design** — `Session` is bound to `ThreadLocal` and cleaned up automatically
-4. **Nested transaction support** — `depth` counting implements REQUIRED propagation
-5. **Rollback-only propagation** — inner failures mark the whole transaction, even if exceptions are swallowed
+2. **Automatic transactions** — a single `save` wraps itself
+3. **Per-`DataStore` isolation** — session state is keyed by *(thread, SessionFactory)*
+4. **Nested transactions** — depth counting implements REQUIRED propagation
+5. **Rollback-only propagation** — inner failures poison the whole transaction even
+   if the exception is swallowed
 6. **Type-safe query DSL** — `User::getName` checked at compile time
-7. **Escape hatches** — `where(QuerySpec)` and `unwrap(SessionFactory.class)`
+7. **Escape hatches** — `where(QuerySpec)`, JPQL, `unwrap(SessionFactory.class)`
 8. **Production-safe defaults** — `ddlAuto="validate"`, no automatic schema changes
-9. **Safety guards** — unconditional `delete()` and `update()` throw exceptions
-10. **Immutable results** — `Page.content()` is unmodifiable
+9. **Safety guards** — unconditional `delete()` / `update()` throw
+10. **Fail loudly** — a commit that cannot commit throws; it never reports success
 
-## Full API Index
-
-### `DataStore`
-
-| Method | Returns |
-|--------|---------|
-| `find(Class<T>, Object)` | `T` |
-| `save(T)` | `T` |
-| `saveAll(List<T>)` | `List<T>` |
-| `delete(Object)` | `void` |
-| `transaction(TransactionCallback<T>)` | `T` |
-| `transaction(Runnable)` | `void` |
-| `query(Class<T>)` | `LambdaQuery<T>` |
-| `query(String, Class<T>)` | `JpqlQuery<T>` |
-| `unwrap(Class<T>)` | `T` |
-| `close()` | `void` |
-
-### `LambdaQuery<T>`
-
-| Method | Returns |
-|--------|---------|
-| `eq` / `ne` / `gt` / `ge` / `lt` / `le` | `LambdaQuery<T>` |
-| `like(SFunction<T,?>, String)` | `LambdaQuery<T>` |
-| `in` / `notIn(SFunction<T,?>, Collection<?>)` | `LambdaQuery<T>` |
-| `isNull` / `isNotNull(SFunction<T,?>)` | `LambdaQuery<T>` |
-| `between(SFunction<T,?>, Object, Object)` | `LambdaQuery<T>` |
-| `orderByAsc` / `orderByDesc(SFunction<T,?>)` | `LambdaQuery<T>` |
-| `where(QuerySpec<T>)` | `LambdaQuery<T>` |
-| `list()` / `list(int)` | `List<T>` |
-| `one()` | `T` |
-| `count()` | `long` |
-| `exists()` | `boolean` |
-| `delete()` | `int` |
-| `update(SFunction<T,?>, Object)` | `int` |
-| `update(Map<String, Object>)` | `int` |
-| `page(PageRequest)` | `Page<T>` |
-
-### `JpqlQuery<T>`
-
-| Method | Returns |
-|--------|---------|
-| `param(String, Object)` | `JpqlQuery<T>` |
-| `list()` / `list(int)` | `List<T>` |
-| `one()` | `T` |
-| `count()` | `long` |
-| `exists()` | `boolean` |
-| `page(String countJpql, PageRequest)` | `Page<T>` |
-
-### `PageRequest`
-
-| Method | Returns |
-|--------|---------|
-| `of(int, int)` | `PageRequest` |
-| `firstPage(int)` | `PageRequest` |
-| `withoutCount()` | `PageRequest` |
-| `offset()` | `int` |
-| `page()` / `size()` | `int` |
-| `countTotal()` | `boolean` |
-
-### `Page<T>`
-
-| Method | Returns |
-|--------|---------|
-| `content()` | `List<T>` |
-| `numberOfElements()` | `int` |
-| `isEmpty()` | `boolean` |
-| `page()` / `size()` | `int` |
-| `totalElements()` | `long` |
-| `totalPages()` | `int` |
-| `hasTotal()` | `boolean` |
-| `hasNext()` / `hasPrevious()` | `boolean` |
-| `isFirst()` / `isLast()` | `boolean` |
-| `map(Function)` | `Page<R>` |
-
-### `HibernateLite.Builder`
-
-| Method | Returns |
-|--------|---------|
-| `dataSource(DataSource)` | `Builder` |
-| `entities(Class<?>...)` | `Builder` |
-| `showSql(boolean)` | `Builder` |
-| `ddlAuto(String)` | `Builder` |
-| `build()` | `DataStore` |
-
-### `QuerySpec<T>`
-
-| Method | Returns |
-|--------|---------|
-| `toPredicate(CriteriaBuilder, Root<T>)` | `Predicate` |
-
-## Testing
+## Building and Testing
 
 ```bash
-mvn clean test
+mvn test        # unit + integration tests (H2 in-memory)
+mvn package     # jar + Javadoc
+mvn verify      # also runs the architecture/diagram injection (needs Graphviz)
 ```
 
-The project currently has **270+ tests** covering:
-
-- CRUD operations
-- Query DSL operators
-- Sorting, aggregates, conditional delete/update
-- JPQL queries
-- Pagination (with / without count)
-- Transactions (commit / rollback / nested)
-- Escape hatches
-- Metadata caching
-- Thread binding and session lifecycle
-
-## Contributing
-
-Issues and pull requests are welcome.
+The test suite currently contains **478 tests**, including an independent
+source-derived audit suite under
+`src/test/java/me/pfzh/hibernatelite/audit/` that pins the behaviours described in
+this document.
 
 ## License
 

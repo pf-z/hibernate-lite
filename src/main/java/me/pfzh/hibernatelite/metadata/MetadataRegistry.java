@@ -49,11 +49,27 @@ public final class MetadataRegistry {
      * @throws HibernateLiteException if the entity class has no {@code @Id}
      *                                or declares multiple {@code @Id} fields
      */
+    /**
+     * Maps a Hibernate proxy class back to the annotated entity class, so that a
+     * proxy never gets its own metadata entry.
+     *
+     * @param clazz class or proxy class
+     * @return the nearest {@code @Entity} annotated class in the hierarchy
+     */
+    private static Class<?> effectiveEntityClass(Class<?> clazz) {
+        for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+            if (c.isAnnotationPresent(jakarta.persistence.Entity.class)) {
+                return c;
+            }
+        }
+        return clazz;
+    }
+
     public EntityMeta get(Class<?> entityClass) {
         if (entityClass == null) {
             throw new IllegalArgumentException("entityClass cannot be null");
         }
-        return cache.computeIfAbsent(entityClass, EntityMeta::new);
+        return cache.computeIfAbsent(effectiveEntityClass(entityClass), EntityMeta::new);
     }
 
 }

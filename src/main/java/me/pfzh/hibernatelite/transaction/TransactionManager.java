@@ -3,6 +3,7 @@ package me.pfzh.hibernatelite.transaction;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.internal.SessionContext;
 import me.pfzh.hibernatelite.internal.SessionFactoryHolder;
+import org.hibernate.SessionFactory;
 
 import java.util.Objects;
 
@@ -66,21 +67,22 @@ public final class TransactionManager {
     public <T> T execute(TransactionCallback<T> callback) {
         Objects.requireNonNull(callback, "callback cannot be null");
 
-        boolean autoTx = !SessionContext.inTransaction();
+        SessionFactory factory = factoryHolder.get();
+        boolean autoTx = !SessionContext.inTransaction(factory);
         if (autoTx) {
-            SessionContext.begin(factoryHolder.get());
+            SessionContext.begin(factory);
         }
         try {
             T result = callback.execute();
             if (autoTx) {
-                SessionContext.commit();
+                SessionContext.commit(factory);
             }
             return result;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             if (autoTx) {
-                SessionContext.rollback();
+                SessionContext.rollback(factory);
             } else {
-                SessionContext.markRollbackOnly();
+                SessionContext.markRollbackOnly(factory);
             }
             throw e;
         }
