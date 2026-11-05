@@ -46,7 +46,8 @@ examples/
     ├── model/
     │   ├── User.java             generated Long id, name, age, status
     │   ├── Account.java          business key (@Id String), no @GeneratedValue
-    │   └── Purchase.java         lazy @ManyToOne to User
+    │   ├── Purchase.java         lazy @ManyToOne to User
+    │   └── VersionedAccount.java @Version entity for optimistic locking
     ├── CrudExample.java          find / save / saveAll / delete
     ├── QueryOperatorExample.java all 12 operators, ordering, terminal operations
     ├── PaginationExample.java    PageRequest + Page, both modes, DTO mapping
@@ -55,6 +56,7 @@ examples/
     ├── TransactionExample.java   commit, rollback, nesting, rollback-only, Error
     ├── EscapeHatchExample.java   where(QuerySpec), unwrap(SessionFactory)
     ├── LifecycleExample.java     Builder, close(), batching, detached state
+    ├── OptimisticLockingExample.java  stale save/delete rejected through @Version
     └── ErrorHandlingExample.java one call per exception type
 ```
 
@@ -70,6 +72,7 @@ examples/
 | `TransactionExample` | callback and Runnable forms, rollback, nested REQUIRED, rollback-only propagation, `Error` cleanup |
 | `EscapeHatchExample` | `where(spec)` alone / with DSL / repeated / returning null, `unwrap(SessionFactory)` + native SQL, `SessionContext.current` |
 | `LifecycleExample` | all `Builder` options, validation, try-with-resources, idempotent `close()`, use-after-close, 50-row batch boundary, detached entities and lazy loading |
+| `OptimisticLockingExample` | `@Version`, stale `save()`/`delete()` rejection, `HibernateLiteException` wrapping, bulk-DML scope |
 | `ErrorHandlingExample` | `IllegalArgumentException`, `NullPointerException`, `HibernateLiteException`, `IllegalStateException`, `UnsupportedOperationException` |
 
 ## API coverage
@@ -92,9 +95,9 @@ Every public method of the facade is exercised below.
 | API | Where |
 |---|---|
 | `find(Class, Object)` | `CrudExample` |
-| `save(T)` | `CrudExample`, `TransactionExample` |
+| `save(T)` | `CrudExample`, `TransactionExample`, `OptimisticLockingExample` |
 | `saveAll(List)` | `CrudExample`, `LifecycleExample` |
-| `delete(Object)` | `CrudExample` |
+| `delete(Object)` | `CrudExample`, `OptimisticLockingExample` |
 | `transaction(TransactionCallback)` | `TransactionExample` |
 | `transaction(Runnable)` | `TransactionExample` |
 | `query(Class)` | every query example |

@@ -5,6 +5,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.Version;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import org.junit.jupiter.api.Test;
 
@@ -88,6 +89,38 @@ class EntityMetaTest {
 
         public Long getId() { return id; }
         public void setId(Long id) { this.id = id; }
+    }
+
+    @Entity
+    static class VersionedEntity {
+        @Id
+        private Long id;
+
+        @Version
+        private Long version;
+
+        private String name;
+
+        public Long getId() { return id; }
+        public Long getVersion() { return version; }
+    }
+
+    @Entity
+    static class JavaTransientEntity {
+        @Id
+        private Long id;
+
+        private transient String cache;
+    }
+
+    static class PlainBase {
+        private String baseField;
+    }
+
+    @Entity
+    static class PlainChildEntity extends PlainBase {
+        @Id
+        private Long id;
     }
 
     // ==================== idField 查找 ====================
@@ -199,5 +232,38 @@ class EntityMetaTest {
         assertNull(meta.getField("CONSTANT"), "static field should be skipped");
         assertNotNull(meta.getField("name"));
         assertNotNull(meta.getField("id"));
+    }
+
+    @Test
+    void scanFields_skipsJavaTransientFields() {
+        EntityMeta meta = new EntityMeta(JavaTransientEntity.class);
+        assertNull(meta.getField("cache"), "Java-transient field should be skipped");
+    }
+
+    @Test
+    void scanFields_skipsFieldsOfNonMappedSuperclass() {
+        EntityMeta meta = new EntityMeta(PlainChildEntity.class);
+        assertNull(meta.getField("baseField"),
+                "fields of a non-@MappedSuperclass parent are not persistent");
+        assertNotNull(meta.getField("id"));
+    }
+
+    // ==================== @Version ====================
+
+    @Test
+    void versionField_isExposed() {
+        EntityMeta meta = new EntityMeta(VersionedEntity.class);
+        assertTrue(meta.hasVersion());
+
+        VersionedEntity entity = new VersionedEntity();
+        entity.version = 7L;
+        assertEquals(7L, meta.getVersion(entity));
+    }
+
+    @Test
+    void versionField_isOptional() {
+        EntityMeta meta = new EntityMeta(SimpleEntity.class);
+        assertFalse(meta.hasVersion());
+        assertNull(meta.getVersion(new SimpleEntity()));
     }
 }

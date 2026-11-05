@@ -62,6 +62,21 @@ public final class TransactionTemplate {
     }
 
     /**
+     * Returns whether the current thread already has a transaction for this
+     * template's SessionFactory.
+     *
+     * <p>Batch operations use this to distinguish "we own the transaction and
+     * the Session" from "we join a transaction opened by the caller". In the
+     * latter case the persistence context may contain entities that belong to
+     * the caller and must not be cleared.</p>
+     *
+     * @return {@code true} if a transaction is already active for this factory
+     */
+    boolean inTransaction() {
+        return SessionContext.inTransaction(factoryHolder.get());
+    }
+
+    /**
      * Executes an operation inside a transaction.
      *
      * <p>The provided function receives the current thread's Hibernate

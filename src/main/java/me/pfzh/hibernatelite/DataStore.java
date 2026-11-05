@@ -97,21 +97,21 @@ public interface DataStore extends AutoCloseable {
      * </p>
      *
      * <p>
-     * During batch processing, the persistence context may be
-     * flushed and cleared.
-     * Therefore returned objects may no longer be managed
-     * by Hibernate.
+     * During batch processing, the flushed batch is detached (when this call
+     * joins a caller transaction) or the temporary persistence context is
+     * cleared (when this call owns the transaction). Entities that the caller
+     * loaded in the same transaction remain managed, so their subsequent
+     * changes are still flushed at commit.
      * </p>
      *
      * <p>
-     * If further modification is required,
-     * reload the entity through {@link #find(Class, Object)}
-     * or explicitly merge it again.
+     * If further modification of a returned batch entity is required,
+     * reload it through {@link #find(Class, Object)} or merge it again.
      * </p>
      *
      * @param entities entities to save
-     * @return persisted entities in the same order; entities after a
-     *         batch boundary are detached
+     * @return persisted entities in the same order; entities of a flushed
+     *         batch are detached
      */
     <T> List<T> saveAll(List<T> entities);
 
@@ -127,7 +127,15 @@ public interface DataStore extends AutoCloseable {
      * the method returns silently.
      * </p>
      *
+     * <p>
+     * For a versioned entity ({@code @Version}) the version of a detached
+     * snapshot is compared with the current row. A stale snapshot is rejected
+     * with {@link HibernateLiteException} instead of deleting newer data.
+     * </p>
+     *
      * @param entity entity to remove
+     * @throws HibernateLiteException if the entity has no identifier or is a
+     *                                stale versioned snapshot
      */
     void delete(Object entity);
 

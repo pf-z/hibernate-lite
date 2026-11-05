@@ -94,9 +94,10 @@ db.transaction(() -> {
 - **JPQL support** — for multi-table joins, subqueries, and complex queries
 - **Pagination** — with or without total count, with DTO mapping
 - **Conditional update and delete** — one SQL statement, with safety guards
+- **Optimistic locking** — `@Version` is enforced by `save()` and `delete()`
 - **Nested transaction support** — REQUIRED semantics with rollback-only propagation
 - **Thread-safe per `DataStore`** — session state is bound to *(thread, SessionFactory)*
-- **Native Hibernate exceptions wrapped** into `HibernateLiteException`
+- **Native Hibernate/JPA exceptions wrapped** into `HibernateLiteException`
 - **Escape hatches** — `where(QuerySpec)`, JPQL, `unwrap(SessionFactory.class)`
 
 ## Requirements
@@ -279,12 +280,15 @@ List<User> saved = db.saveAll(users);
 ```
 
 - All entities are written in **one transaction**.
-- Every **50** rows the persistence context is flushed and cleared, so memory stays
-  bounded for large batches.
+- Every **50** rows the batch is flushed. When `saveAll` runs inside a caller
+  transaction, only the entities written in that batch are detached; unrelated
+  managed entities stay attached and their later changes are still flushed at
+  commit. When `saveAll` owns the transaction, the temporary persistence context
+  is cleared, so memory stays bounded for large batches.
 - This is **not** JDBC batching: `hibernate.jdbc.batch_size` is never set, and
   `IDENTITY` generators cannot be batched at all.
 - **Any failure rolls back the whole batch.**
-- Entities after a flush/clear boundary are **detached**.
+- Entities of a flushed batch are **detached**.
 - An empty input list is returned as-is (no transaction is opened).
 - A `null` element throws `HibernateLiteException` naming the offending index.
 
@@ -300,6 +304,9 @@ db.delete(detached);
 
 - Idempotent — silently returns when no matching row exists.
 - Works with managed entities, detached entities, and lazy proxies.
+- For an entity with a `@Version` field, a detached snapshot whose version differs
+  from the current database row is rejected with `HibernateLiteException`; reload
+  the entity before deleting it.
 - Throws `HibernateLiteException` if the entity has no identifier.
 
 ### 3. Query DSL
@@ -363,7 +370,7 @@ database.
 | `list(int limit)` | Explicitly limited |
 | `one()` | Exactly one (0 → `null`; >1 → `HibernateLiteException`) |
 | `count()` | `SELECT COUNT(...)` |
-| `exists()` | Implemented as `count() > 0` |
+| `exists()` | Limit-1 query (`list(1)`); no full `COUNT` |
 | `delete()` | Bulk delete, requires a restriction |
 | `update(field, value)` / `update(Map)` | Bulk update, requires a restriction |
 | `page(PageRequest)` | Paginated result |
@@ -651,6 +658,26 @@ afterwards, so later reads inside the same transaction observe the new state.
 The trade-off: **every entity becomes detached** at that point. Re-`find`/`save`
 them afterwards if you need to keep mutating them.
 
+> **Optimistic locking and bulk DML.** Bulk `update()` / `delete()` do **not**
+> perform per-row `@Version` checks and do not increment the version attribute.
+> This matches JPA bulk-update semantics, but it means a bulk statement can
+> overwrite a row changed concurrently. Use per-entity `save()` / `delete()` when
+> optimistic locking matters, or include the version in the `WHERE` clause through
+> `where(QuerySpec)` and bump it explicitly.
+
+### Optimistic locking
+
+A single field annotated with `@Version` is supported (field access, like `@Id`).
+
+- `save()` of a detached entity with a stale version fails with
+  `HibernateLiteException` (cause `OptimisticLockException`) instead of
+  overwriting the newer row.
+- `delete()` of a detached entity whose version differs from the current row is
+  rejected with `HibernateLiteException`; reload it first.
+- Uninitialised Hibernate proxies do not expose their version, so the delete
+  check is skipped for them.
+- Bulk `update()` / `delete()` are exempt (see the note above).
+
 ### Concurrency and multiple DataStores
 
 | Component | Thread-safe? |
@@ -691,12 +718,13 @@ hatches.
 | Pagination | No default `ORDER BY`; unstable pages without explicit ordering |
 | Total count | Page and count run in two transactions |
 | JPQL | `page(PageRequest)` always throws; no native SQL, no DML |
-| Bulk DML | Detaches everything in the persistence context |
+| Bulk DML | Detaches everything in the persistence context; does not perform per-row `@Version` checks or bump the version |
+| Optimistic locking | `@Version` is checked by `save()` and `delete()`; bulk `update()`/`delete()` bypass it (JPA semantics) |
 | Batching | No JDBC batching (`hibernate.jdbc.batch_size` is not set); `IDENTITY` cannot batch |
-| Configuration | Only `dataSource`, `entities`, `showSql`, `ddlAuto`; no way to pass extra Hibernate settings (dialect, fetch size, second-level cache, ...) |
+| Configuration | Only `dataSource`, `entities`, `showSql`, `ddlAuto` on the builder; extra Hibernate settings need a global classpath `hibernate.properties` and cannot differ per `DataStore` |
 | Caching | No second-level cache |
 | Transactions | No `REQUIRES_NEW`, no savepoints, no read-only transactions, no isolation-level control |
-| `@Transient` | Excluded from persistent-attribute metadata, so referencing one in a query/update fails with `Entity ... has no field` rather than "not a persistent attribute" |
+| `@Transient` | `@Transient`, Java `transient` and non-mapped-superclass fields are excluded from metadata; referencing one in a query/update fails with `Entity ... has no field` rather than "not a persistent attribute" |
 | `Page` | No `equals`/`hashCode`; `map` cannot return `null` |
 | Callbacks | `TransactionCallback` cannot throw checked exceptions |
 
@@ -706,7 +734,7 @@ hatches.
 
 | Exception | Trigger |
 |-----------|---------|
-| `HibernateLiteException` | Runtime failures; wraps `HibernateException` |
+| `HibernateLiteException` | Runtime failures; wraps Hibernate and JPA `PersistenceException`s (including `OptimisticLockException`) |
 | `IllegalArgumentException` | Parameter validation in `CrudExecutor`, `QueryExecutor`, `PageRequest` |
 | `NullPointerException` | `Objects.requireNonNull` in `DataStoreImpl` / `TransactionManager` |
 | `UnsupportedOperationException` | `JpqlQuery.page(PageRequest)` |
@@ -723,6 +751,8 @@ hatches.
 | Unconditional `delete()` | `HibernateLiteException` | `refusing to delete all rows of ...` |
 | Unconditional `update()` | `HibernateLiteException` | `refusing to update all rows of ...` |
 | `save` with business key | `HibernateLiteException` | `Cannot determine save semantics ...` |
+| Stale `delete` of a versioned entity | `HibernateLiteException` | `Stale entity: ... has version ...` |
+| Stale `save` of a versioned entity | `HibernateLiteException` | `save failed` (cause: `OptimisticLockException`) |
 | Unknown field | `HibernateLiteException` | `Entity ... has no field: nmae` |
 | Empty `IN` list | `HibernateLiteException` | `IN / NOT IN requires a non-empty collection` |
 | JPQL syntax error | `IllegalArgumentException` | Hibernate parser message |
@@ -734,7 +764,7 @@ hatches.
 
 ### Wrapping rules
 
-- Hibernate exceptions → `HibernateLiteException` (with `cause`)
+- Hibernate and JPA persistence exceptions → `HibernateLiteException` (with `cause`)
 - Library exceptions → rethrown unchanged (never double-wrapped)
 - Parameter validation → thrown directly
 
@@ -767,12 +797,18 @@ See [examples/README.md](examples/README.md) for the API coverage matrix.
 ## Building and Testing
 
 ```bash
-mvn test        # unit + integration tests (H2 in-memory)
-mvn package     # jar + Javadoc
-mvn verify      # also runs the architecture/diagram injection (needs Graphviz)
+mvn test              # unit + integration tests (H2 in-memory)
+mvn package           # jar + Javadoc
+mvn verify            # tests + Javadoc; no diagram generation
+mvn -Pdiagrams verify # additionally generates/injects the architecture SVGs
+                      # (requires Graphviz and a fontconfig installation)
 ```
 
-The test suite currently contains **478 tests**, including an independent
+The default `verify` does not need Graphviz or system fonts, so it also works in a
+minimal headless container. The `diagrams` profile is opt-in; the Javadoc CI
+workflow enables it explicitly.
+
+The test suite currently contains **491 tests**, including an independent
 source-derived audit suite under
 `src/test/java/me/pfzh/hibernatelite/audit/` that pins the behaviours described in
 this document.

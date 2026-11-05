@@ -91,26 +91,30 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- 分析工具依赖 -->
+        <!-- 分析工具依赖：只用于构建期生成架构图，不应传递给库的使用者 -->
         <dependency>
             <groupId>com.github.javaparser</groupId>
             <artifactId>javaparser-core</artifactId>
             <version>3.25.10</version>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>com.github.javaparser</groupId>
             <artifactId>javaparser-symbol-solver-core</artifactId>
             <version>3.25.10</version>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>net.sourceforge.plantuml</groupId>
             <artifactId>plantuml</artifactId>
             <version>1.2023.12</version>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.jsoup</groupId>
             <artifactId>jsoup</artifactId>
             <version>1.17.2</version>
+            <optional>true</optional>
         </dependency>
     </dependencies>
 
@@ -152,6 +156,22 @@
                 <version>3.5.2</version>
             </plugin>
 
+            <!--
+              The arch/ package is a build-time documentation tool. It must not
+              ship in the library jar, otherwise every consumer would also need
+              the (optional) JavaParser/PlantUML/jsoup dependencies at runtime.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <excludes>
+                        <exclude>me/pfzh/hibernatelite/arch/**</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+
             <!-- 生成 Javadoc HTML -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -180,27 +200,52 @@
                 </configuration>
             </plugin>
 
-            <!-- 分析源码 + 生成 SVG + 注入到 HTML -->
+            <!--
+              Only declared here so that "mvn exec:java" can run the examples.
+              The diagram-injection execution lives in the opt-in "diagrams"
+              profile, because it needs PlantUML, Graphviz and system fonts.
+            -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.1.0</version>
-                <executions>
-                    <execution>
-                        <id>inject-diagrams</id>
-                        <phase>verify</phase>
-                        <goals><goal>java</goal></goals>
-                        <configuration>
-                            <mainClass>me.pfzh.hibernatelite.arch.ArchMain</mainClass>
-                            <arguments>
-                                <argument>me.pfzh.hibernatelite</argument>
-                            </arguments>
-                            <classpathScope>runtime</classpathScope>
-                        </configuration>
-                    </execution>
-                </executions>
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+          Opt-in: generate the architecture SVG diagrams and inject them into
+          the generated Javadoc. Requires Graphviz plus a fontconfig installation
+          with at least one font; a minimal headless container usually lacks the
+          latter. CI enables this profile explicitly.
+        -->
+        <profile>
+            <id>diagrams</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>inject-diagrams</id>
+                                <phase>verify</phase>
+                                <goals><goal>java</goal></goals>
+                                <configuration>
+                                    <mainClass>me.pfzh.hibernatelite.arch.ArchMain</mainClass>
+                                    <arguments>
+                                        <argument>me.pfzh.hibernatelite</argument>
+                                    </arguments>
+                                    <classpathScope>runtime</classpathScope>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
 </project>

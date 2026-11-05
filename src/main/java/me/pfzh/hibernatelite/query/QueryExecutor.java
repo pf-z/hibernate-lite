@@ -1,5 +1,6 @@
 package me.pfzh.hibernatelite.query;
 
+import jakarta.persistence.PersistenceException;
 import jakarta.persistence.criteria.*;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.internal.TransactionTemplate;
@@ -7,7 +8,6 @@ import me.pfzh.hibernatelite.metadata.EntityMeta;
 import me.pfzh.hibernatelite.metadata.MetadataRegistry;
 import me.pfzh.hibernatelite.pagination.Page;
 import me.pfzh.hibernatelite.pagination.PageRequest;
-import org.hibernate.HibernateException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -292,6 +292,11 @@ public final class QueryExecutor {
     /**
      * Checks whether at least one entity matches the given conditions.
      *
+     * <p>Implemented as a {@code SELECT ... FETCH FIRST 1 ROW ONLY} (through
+     * {@link #list(Class, List, List, int, List)}) rather than
+     * {@code SELECT COUNT(*)}: existence can stop at the first row, while a
+     * count has to scan every matching row.</p>
+     *
      * @param clazz entity type
      * @param conditions Lambda DSL conditions
      * @param specs advanced Criteria predicates
@@ -301,13 +306,7 @@ public final class QueryExecutor {
     public <T> boolean exists(Class<T> clazz,
                               List<QueryCondition> conditions,
                               List<QuerySpec<T>> specs) {
-        /*
-         * The current implementation reuses count().
-         *
-         * If the count is greater than zero, at least one matching
-         * entity exists.
-         */
-        return count(clazz, conditions, specs) > 0;
+        return !list(clazz, conditions, List.of(), 1, specs).isEmpty();
     }
 
     // ==================== delete ====================
@@ -619,8 +618,8 @@ public final class QueryExecutor {
     }
 
     /**
-     * Executes an operation and converts Hibernate exceptions into
-     * the framework's unified exception type.
+     * Executes an operation and converts Hibernate/JPA persistence exceptions
+     * into the framework's unified exception type.
      *
      * <p>Existing {@link HibernateLiteException} instances are rethrown
      * unchanged so that they are not wrapped multiple times.</p>
@@ -629,7 +628,7 @@ public final class QueryExecutor {
      * @param action operation to execute
      * @param <R> result type
      * @return operation result
-     * @throws HibernateLiteException if a Hibernate operation fails
+     * @throws HibernateLiteException if a persistence operation fails
      */
     private <R> R wrap(String operation, Supplier<R> action) {
         try {
@@ -641,10 +640,10 @@ public final class QueryExecutor {
              * exception type, so preserve it unchanged.
              */
             throw e;
-        } catch (HibernateException e) {
+        } catch (PersistenceException e) {
 
             /*
-             * Convert Hibernate's exception hierarchy into the
+             * Convert Hibernate's and JPA's exception hierarchies into the
              * framework's unified exception type.
              */
             throw new HibernateLiteException(operation + " failed", e);

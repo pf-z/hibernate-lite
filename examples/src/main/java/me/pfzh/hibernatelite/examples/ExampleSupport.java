@@ -6,6 +6,7 @@ import me.pfzh.hibernatelite.HibernateLite;
 import me.pfzh.hibernatelite.examples.model.Account;
 import me.pfzh.hibernatelite.examples.model.Purchase;
 import me.pfzh.hibernatelite.examples.model.User;
+import me.pfzh.hibernatelite.examples.model.VersionedAccount;
 
 import java.util.List;
 import java.util.function.Consumer;
@@ -24,7 +25,8 @@ public final class ExampleSupport {
     }
 
     /** Every entity the examples need, registered once. */
-    private static final Class<?>[] ENTITIES = {User.class, Purchase.class, Account.class};
+    private static final Class<?>[] ENTITIES =
+            {User.class, Purchase.class, Account.class, VersionedAccount.class};
 
     /**
      * Builds a DataStore, runs the example body, and closes everything.

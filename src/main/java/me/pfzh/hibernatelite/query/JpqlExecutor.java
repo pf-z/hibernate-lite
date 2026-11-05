@@ -1,10 +1,10 @@
 package me.pfzh.hibernatelite.query;
 
+import jakarta.persistence.PersistenceException;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
 import me.pfzh.hibernatelite.internal.TransactionTemplate;
 import me.pfzh.hibernatelite.pagination.Page;
 import me.pfzh.hibernatelite.pagination.PageRequest;
-import org.hibernate.HibernateException;
 
 import java.util.List;
 import java.util.Map;
@@ -281,7 +281,7 @@ public final class JpqlExecutor {
             return action.get();
         } catch (HibernateLiteException e) {
             throw e;
-        } catch (HibernateException e) {
+        } catch (PersistenceException e) {
             throw new HibernateLiteException(operation + " failed", e);
         }
     }

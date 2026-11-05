@@ -24,6 +24,7 @@ public final class RunAll {
         EscapeHatchExample.main(args);
         LifecycleExample.main(args);
         ErrorHandlingExample.main(args);
+        OptimisticLockingExample.main(args);
         System.out.println();
         System.out.println("All examples finished.");
     }

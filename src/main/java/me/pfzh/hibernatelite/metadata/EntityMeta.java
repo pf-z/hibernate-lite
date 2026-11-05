@@ -2,7 +2,9 @@ package me.pfzh.hibernatelite.metadata;
 
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.persistence.MappedSuperclass;
 import jakarta.persistence.Transient;
+import jakarta.persistence.Version;
 import org.hibernate.Hibernate;
 import org.hibernate.proxy.HibernateProxy;
 import me.pfzh.hibernatelite.exception.HibernateLiteException;
@@ -30,6 +32,8 @@ import java.util.Map;
  *     on a field, not on a getter method.</li>
  *     <li>Only single-field {@code @Id} is supported.
  *     {@code @EmbeddedId} and composite keys are not supported.</li>
+ *     <li>Fields declared by a plain (non-{@code @Entity},
+ *     non-{@code @MappedSuperclass}) superclass are ignored, matching JPA.</li>
  * </ul>
  *
  * @author Pengfei Zhang
@@ -42,6 +46,9 @@ public final class EntityMeta {
 
     // Field annotated with {@link Id}.
     private final Field idField;
+
+    // Optional field annotated with {@link Version}.
+    private final Field versionField;
 
     // Whether the identifier is generated automatically.
     private final boolean hasGeneratedId;
@@ -68,6 +75,7 @@ public final class EntityMeta {
         }
         this.entityClass = entityClass;
         this.idField = findIdField(entityClass);
+        this.versionField = findVersionField(entityClass);
         this.hasGeneratedId = idField.isAnnotationPresent(GeneratedValue.class);
         this.fields = Collections.unmodifiableMap(scanFields(entityClass));
     }
@@ -155,13 +163,62 @@ public final class EntityMeta {
     }
 
     /**
+     * Checks whether this entity declares a {@link Version} field.
+     *
+     * <p>When {@code true}, callers are expected to honour optimistic locking:
+     * a detached entity whose version differs from the database row is stale.</p>
+     *
+     * @return {@code true} if a {@code @Version} field is present
+     */
+    public boolean hasVersion() {
+        return versionField != null;
+    }
+
+    /**
+     * Reads the version value of an entity instance.
+     *
+     * <p>For an uninitialised Hibernate proxy the version may not be available
+     * yet; in that case this method returns {@code null} and callers must skip
+     * the optimistic-locking check rather than treating the entity as new.</p>
+     *
+     * @param entity entity instance
+     * @return version value, or {@code null} when the entity has no
+     *         {@code @Version} field or the value cannot be read from a proxy
+     * @throws IllegalArgumentException if the entity is not an instance of the
+     *                                  mapped entity class
+     * @throws HibernateLiteException   if reflective access fails
+     */
+    public Object getVersion(Object entity) {
+        if (versionField == null) {
+            return null;
+        }
+        if (entity == null) {
+            throw new IllegalArgumentException("entity cannot be null");
+        }
+        if (!entityClass.isInstance(entity)) {
+            throw new IllegalArgumentException(
+                    "Invalid entity type: expected " + entityClass.getName()
+                            + ", but got " + entity.getClass().getName());
+        }
+        try {
+            return versionField.get(unproxy(entity));
+        } catch (IllegalAccessException e) {
+            throw new HibernateLiteException(
+                    "Failed to read @Version field: " + entityClass.getName()
+                            + "#" + versionField.getName(), e);
+        }
+    }
+
+    /**
      * Returns a field by its Java field name.
      *
      * <p>This method is mainly used for field validation and future
      * extensions such as auditing or automatic field population.</p>
      *
-     * <p>Only non-static, non-synthetic fields are included.
-     * Fields declared in superclasses are also visible.</p>
+     * <p>Only persistent fields are included: static, synthetic, Java-transient
+     * and {@code @Transient} fields are skipped, as are fields declared by a
+     * non-{@code @MappedSuperclass} superclass. Fields of the entity class and
+     * its mapped ancestors are visible.</p>
      *
      * @param name field name; if {@code null}, returns {@code null}
      * @return corresponding field, or {@code null} if not found
@@ -195,8 +252,10 @@ public final class EntityMeta {
     private static Field findIdField(Class<?> clazz) {
         Field found = null;
         for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+            if (!isMappedClass(clazz, c)) continue;
             for (Field f : c.getDeclaredFields()) {
                 if (Modifier.isStatic(f.getModifiers())) continue;
+                if (Modifier.isTransient(f.getModifiers())) continue;
                 if (f.isSynthetic()) continue;
                 if (f.isAnnotationPresent(Id.class) && !f.isAnnotationPresent(Transient.class)) {
                     if (found != null) {
@@ -215,6 +274,54 @@ public final class EntityMeta {
     }
 
     /**
+     * Finds the optional {@link Version} field in the entity hierarchy.
+     *
+     * <p>Only field access is supported, matching the identifier rules. A
+     * missing version field is not an error: optimistic locking is optional.</p>
+     *
+     * @param clazz entity class
+     * @return version field, or {@code null} when the entity is not versioned
+     * @throws HibernateLiteException if more than one {@code @Version} field is found
+     */
+    private static Field findVersionField(Class<?> clazz) {
+        Field found = null;
+        for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+            if (!isMappedClass(clazz, c)) continue;
+            for (Field f : c.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                if (Modifier.isTransient(f.getModifiers())) continue;
+                if (f.isSynthetic()) continue;
+                if (f.isAnnotationPresent(Version.class) && !f.isAnnotationPresent(Transient.class)) {
+                    if (found != null) {
+                        throw new HibernateLiteException(
+                                "Multiple @Version fields found in entity: " + clazz.getName());
+                    }
+                    f.setAccessible(true);
+                    found = f;
+                }
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Checks whether a class in the hierarchy contributes persistent fields.
+     *
+     * <p>JPA only maps the entity class itself and its {@code @MappedSuperclass}
+     * ancestors. Fields declared by a plain Java superclass are not persistent,
+     * even though Hibernate-Lite used to include them in its metadata.</p>
+     *
+     * @param root  the mapped entity class (always included)
+     * @param candidate class currently being inspected
+     * @return {@code true} if the candidate's fields are persistent
+     */
+    private static boolean isMappedClass(Class<?> root, Class<?> candidate) {
+        return candidate == root
+                || candidate.isAnnotationPresent(jakarta.persistence.Entity.class)
+                || candidate.isAnnotationPresent(MappedSuperclass.class);
+    }
+
+    /**
      * Scans all fields of an entity class.
      *
      * <p>The scan includes fields declared in superclasses.
@@ -230,8 +337,10 @@ public final class EntityMeta {
     private static Map<String, Field> scanFields(Class<?> clazz) {
         Map<String, Field> result = new HashMap<>();
         for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+            if (!isMappedClass(clazz, c)) continue;
             for (Field f : c.getDeclaredFields()) {
                 if (Modifier.isStatic(f.getModifiers())) continue;
+                if (Modifier.isTransient(f.getModifiers())) continue;
                 if (f.isSynthetic()) continue;
                 /*
                  * @Transient fields are not persistent attributes. Including them
